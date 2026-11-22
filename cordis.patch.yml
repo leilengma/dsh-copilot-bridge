@@ -1,0 +1,7 @@
+# dsh-copilot-bridge bundle patch.
+# Declares the GitHub Copilot sign-in plugin. Applied as one layer in the
+# profile bundle stack; the profile's own cordis.patch.yml may override config
+# by id. The Settings page writes `enterpriseUrl` into that profile patch.
+- insert:
+    - id: copilot-bridge
+      name: 'dsh-copilot-bridge'

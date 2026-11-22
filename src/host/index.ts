@@ -1,0 +1,198 @@
+/**
+ * dsh-copilot-bridge Host plugin.
+ *
+ * Runs the GitHub OAuth device flow against github.com or a GitHub Enterprise
+ * host and writes the result as the grant record `llm-pi-ai` reads for its
+ * built-in `github-copilot` provider. That route performs the Copilot token
+ * exchange, discovers models, and serves every request.
+ *
+ * The enterprise host is a volatile config field: the Settings page writes it
+ * into the profile's `cordis.patch.yml` through the settings service, and the
+ * Loader updates it live without remounting the plugin.
+ */
+import type { Context, Volatile } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+import type { CommandResult } from '@deepseek-ai/dsh-commands'
+// Type-only: augment `Context` with `credentials`, `settings`, `connection`, `commands`, and `fiber.entry`.
+import type {} from '@deepseek-ai/dsh-credentials'
+import type {} from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-client-connection'
+import type {} from '@deepseek-ai/cordis-plugin-loader'
+import { API_BASE, PI_AI_PROVIDER, type ApiEnvelope, type AuthStatus, type EnterpriseUrlRequest } from '../shared/contract.ts'
+import { createAuthController, type AuthController, type EnterpriseUrlConfig } from './auth-controller.ts'
+import { pollDeviceFlow, startDeviceFlow } from './device-flow.ts'
+
+export const name = 'copilot-bridge'
+
+/** No hard inject: `credentials`, `settings`, `connection`, and `commands` are optional and resolved when present. */
+export const inject: string[] = []
+
+export interface Config {
+  /** GitHub Enterprise URL or host (e.g. `https://octocorp.ghe.com/`); blank means github.com. */
+  enterpriseUrl: Volatile<string>
+}
+
+export const Config: z<Config> = z.object({
+  enterpriseUrl: z.string()
+    .description('GitHub Enterprise URL or host, e.g. https://octocorp.ghe.com/. Leave blank for github.com.')
+    .default('')
+    .volatile(),
+}) as unknown as z<Config>
+
+const ENTERPRISE_URL_FIELD = 'enterpriseUrl'
+
+function enterpriseUrlConfig(ctx: Context, config: Config): EnterpriseUrlConfig {
+  const entryId = ctx.fiber.entry?.options.id
+  return {
+    read: () => config.enterpriseUrl.get() ?? '',
+    writable: () => entryId !== undefined && ctx.get('settings') !== undefined,
+    async write(host) {
+      const settings = ctx.get('settings')
+      if (settings === undefined || entryId === undefined) {
+        throw new Error('saving the enterprise URL needs the settings service and a profile entry')
+      }
+      if (host === undefined) await settings.mutate(entryId, [{ op: 'unset', path: [ENTERPRISE_URL_FIELD] }])
+      else await settings.update(entryId, { [ENTERPRISE_URL_FIELD]: `https://${host}/` })
+    },
+  }
+}
+
+const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error)
+
+function json<T>(status: number, payload: ApiEnvelope<T>): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+  })
+}
+
+function route<T>(action: (request: Request) => Promise<T>): (request: Request) => Promise<Response> {
+  return async request => {
+    try {
+      return json(200, { ok: true, value: await action(request) })
+    } catch (error) {
+      return json(500, { ok: false, error: errorMessage(error) })
+    }
+  }
+}
+
+async function readEnterpriseUrlRequest(request: Request): Promise<string> {
+  const body: unknown = await request.json()
+  const value = typeof body === 'object' && body !== null ? (body as Partial<EnterpriseUrlRequest>).enterpriseUrl : undefined
+  if (typeof value !== 'string') throw new Error('request body must be {"enterpriseUrl": string}')
+  return value
+}
+
+function registerRoutes(ctx: Context, auth: AuthController): void {
+  // `connection.fetch` routes run only after the shared `/api` channel applied its
+  // trust and authentication policy; `webServer.register` would be unauthenticated.
+  ctx.inject(['connection'], connectionCtx => {
+    connectionCtx.effect(() => {
+      const { fetch } = connectionCtx.connection
+      const disposers = [
+        fetch.register({ path: `${API_BASE}/status`, methods: ['GET'], requestBody: 'buffered', fetch: route(() => auth.status()) }),
+        fetch.register({ path: `${API_BASE}/login`, methods: ['POST'], requestBody: 'buffered', fetch: route(() => auth.login()) }),
+        fetch.register({ path: `${API_BASE}/logout`, methods: ['POST'], requestBody: 'buffered', fetch: route(() => auth.logout()) }),
+        fetch.register({
+          path: `${API_BASE}/enterprise-url`,
+          methods: ['POST'],
+          requestBody: 'buffered',
+          fetch: route(async request => auth.setEnterpriseUrl(await readEnterpriseUrlRequest(request))),
+        }),
+      ]
+      return async () => {
+        for (const dispose of disposers.reverse()) await dispose()
+      }
+    }, `${name}: Web sign-in routes`)
+  })
+}
+
+function loginText(status: AuthStatus): string {
+  if (status.authenticated) return 'GitHub Copilot is already authenticated. Run /copilot-status for details.'
+  return [
+    `GitHub Copilot sign-in (${status.githubHost})`,
+    `1. Open this URL in your browser: ${status.verificationUri ?? ''}`,
+    `2. Enter this code: ${status.userCode ?? ''}`,
+    '3. Authorize the GitHub App (VS Code) and complete sign-in.',
+    '',
+    'Polling continues in the background; the credential is stored once you authorize.',
+    `Then select a model under the "${PI_AI_PROVIDER}" provider in Settings → Models.`,
+  ].join('\n')
+}
+
+function statusText(status: AuthStatus): string {
+  if (!status.authenticated) {
+    return `GitHub Copilot is NOT signed in (host: ${status.githubHost}). Run /copilot-login to sign in.`
+  }
+  return [
+    `GitHub Copilot: authenticated at ${status.signedInHost ?? status.githubHost}.`,
+    ...status.signedInHost === undefined ? [] : [
+      `The configured host is now ${status.githubHost}; run /copilot-logout and /copilot-login to switch.`,
+    ],
+    `Credential published to the "${status.provider}" provider.`,
+    status.modelCount === undefined
+      ? 'The model list is populated by that provider on its first request.'
+      : `Models available to this account: ${status.modelCount}`,
+  ].join('\n')
+}
+
+function registerCommands(ctx: Context, auth: AuthController): void {
+  const run = (render: () => Promise<string>) => async (): Promise<CommandResult> => {
+    try {
+      return { kind: 'success', text: await render() }
+    } catch (error) {
+      return { kind: 'error', text: errorMessage(error) }
+    }
+  }
+  ctx.inject(['commands'], commandsCtx => {
+    commandsCtx.effect(() => {
+      const disposers = [
+        commandsCtx.commands.register({
+          name: 'copilot-login',
+          description: 'Sign in to GitHub Copilot via the device flow',
+          handler: run(async () => loginText(await auth.login())),
+        }),
+        commandsCtx.commands.register({
+          name: 'copilot-status',
+          description: 'Show GitHub Copilot authentication status',
+          handler: run(async () => statusText(await auth.status())),
+        }),
+        commandsCtx.commands.register({
+          name: 'copilot-logout',
+          description: 'Sign out of GitHub Copilot and remove the stored credential',
+          handler: run(async () => {
+            const wasSignedIn = (await auth.status()).authenticated
+            await auth.logout()
+            return wasSignedIn
+              ? `GitHub Copilot signed out; the "${PI_AI_PROVIDER}" credential has been removed.`
+              : 'GitHub Copilot is not signed in. Nothing to do.'
+          }),
+        }),
+      ]
+      return () => { for (const dispose of disposers.reverse()) dispose() }
+    }, `${name}: slash commands`)
+  })
+}
+
+export function apply(ctx: Context, config: Config): void {
+  const auth = createAuthController({
+    credentials: () => ctx.get('credentials'),
+    config: enterpriseUrlConfig(ctx, config),
+    startDeviceFlow,
+    pollDeviceFlow,
+    logger: {
+      info: message => ctx.logger.info(`${name}: ${message}`),
+      warn: message => ctx.logger.warn(`${name}: ${message}`),
+      error: error => ctx.logger.error(error),
+    },
+  })
+  ctx.effect(() => () => auth.dispose(), `${name}: stop device-flow polling`)
+
+  // This plugin ships its own Settings page; hide the generated form.
+  ctx.inject(['settings'], settingsCtx => {
+    settingsCtx.effect(() => settingsCtx.settings.configure({ auto: false }, ctx.fiber), `${name}: custom settings page`)
+  })
+
+  registerRoutes(ctx, auth)
+  registerCommands(ctx, auth)
+}
