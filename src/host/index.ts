@@ -22,6 +22,7 @@ import { PI_AI_PROVIDER, PI_AI_RECORD_KEY, type AuthStatus } from '../shared/con
 import { createAuthController, type AuthController, type BridgeConfig } from './auth-controller.ts'
 import { pollDeviceFlow, startDeviceFlow } from './device-flow.ts'
 import { authRoutes } from './routes.ts'
+import { filterModelSelection } from './model-selection.ts'
 
 export const name = 'copilot-bridge'
 
@@ -173,6 +174,22 @@ export function apply(ctx: Context, config: Config): void {
   ctx.on('credentials/record-updated', key => { if (key === PI_AI_RECORD_KEY) syncModels() })
   ctx.on('loader/volatile-update', paths => { if (paths.some(path => path[0] === 'hiddenModels')) syncModels() })
   ctx.inject(['credentials'], () => { syncModels() })
+  ctx.inject(['llm'], llmCtx => {
+    const notify = () => {
+      void llmCtx.parallel('llm/models-updated', PI_AI_PROVIDER)
+        .catch(error => ctx.logger.warn(`${name}: model selection refresh failed: ${errorMessage(error)}`))
+    }
+    llmCtx.effect(() => {
+      const dispose = filterModelSelection(llmCtx.llm, () => config.hiddenModels.get() ?? [])
+      return () => { dispose(); notify() }
+    }, `${name}: model selection filter`)
+    notify()
+    // Loader targets only the entry fiber, not this injected child's fiber.
+    // Register on the entry context but clean up when the LLM service unloads.
+    llmCtx.effect(() => ctx.on('loader/volatile-update', paths => {
+      if (paths.some(path => path[0] === 'hiddenModels')) notify()
+    }), `${name}: model selection config updates`)
+  })
 
   // This plugin ships its own Settings page; hide the generated form.
   ctx.inject(['settings'], settingsCtx => {

@@ -45,7 +45,9 @@ You can also edit that file by hand. A blank `enterpriseUrl` or `github.com` mea
 
 `hiddenModels` defaults to an empty list and matches **exact, case-sensitive model ids** (not names or patterns). Hand edits take effect live through the Loader's volatile-config notification. Once the full account catalog is known, unknown or removed ids are pruned from the saved list. Removing the last hidden id unsets the key. Without a known catalog, the list is kept until the provider discovers models. If settings are unavailable or pruning cannot be saved, valid hidden ids still apply and status/sign-out remain usable; failed pruning writes are logged and retried on the next reconciliation.
 
-The bridge re-applies hiding after every provider credential refresh; a brief reappearance during refresh is possible. Its full-list bookkeeping is stored alongside the filtered catalog in the credential record, so a restart preserves hidden models and still lets you restore them.
+The bridge re-applies credential filtering after every provider refresh. Its full-list bookkeeping is stored alongside the filtered catalog in the credential record, so a restart preserves hidden models and still lets you restore them.
+
+Harness 0.2.2-rc.5 advertises a static pi-ai catalog without reading the grant's allowed ids. For that version, the bridge also installs a lifetime-scoped compatibility wrapper on the LLM service's model listing, excluding only the configured `github-copilot` ids and notifying cached pickers on mount, edits, and unload. Other providers and model execution are unchanged; unloading the bridge removes its filter. This wrapper can be removed once Harness exposes an equivalent public catalog-filter hook.
 
 Every sign-out and completed sign-in **unsets `hiddenModels`**, regardless of account identity; visibility choices are not remembered per account. A reset write failure is logged without failing authentication/sign-out.
 
@@ -60,11 +62,21 @@ npm ci
 npm run check        # tsc --noEmit, esbuild bundle to lib/, node --test (type-stripped .ts)
 ```
 
-- `src/host/`: Host plugin. Device flow, auth controller, credential grant, `/api/copilot-bridge/*` routes, commands and config writes.
+- `src/host/`: Host plugin. Device flow, auth controller, credential grant, model-selection compatibility filter, `/api/copilot-bridge/*` routes, commands and config writes.
 - `src/client/`: React Settings page, login dialog and logout confirmation.
 - `src/shared/contract.ts`: request and response types shared by the Host and the client.
 
 `lib/` is committed so that `github:` installs work without a build step. Run `npm run build` before you commit.
+
+For the installed desktop integration (no network, real credentials, or profile changes), build first and run:
+
+```sh
+ELECTRON_RUN_AS_NODE=1 '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness' \
+  scripts/test-installed-harness.cjs \
+  '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules'
+```
+
+This checks the installed pi-ai adapter and LLM service, including removal of a hidden model from the advertised picker catalog and restoration on bridge unload.
 
 To test a local checkout without touching your desktop profile:
 
