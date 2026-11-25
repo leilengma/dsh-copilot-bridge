@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Model visibility in **Settings → GitHub Copilot**: hide raw model ids with immediate-save checkboxes, a scrollable list, case-insensitive search, whole-account counts, and English/Chinese copy.
+- Profile-level `hiddenModels` configuration with live hand edits, exact-id matching, automatic pruning, and re-filtering after Copilot token refreshes. The full catalog is retained in credential bookkeeping across restarts.
+- Hidden choices reset on every sign-out and completed sign-in. `/copilot-status` reports the hidden count. Hiding an active model or every model is allowed, with a warning in Settings.
+
 ## 0.1.0
 
 First release.

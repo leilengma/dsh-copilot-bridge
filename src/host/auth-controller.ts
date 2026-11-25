@@ -6,25 +6,29 @@ import {
 } from '../shared/contract.ts'
 import type { DeviceAuthorization, PollResult } from './device-flow.ts'
 import { normalizeEnterpriseDomain } from './enterprise.ts'
-import { grantEnterpriseDomain, grantModelIds, grantToken, piAiGrantRecord } from './grant.ts'
+import { grantEnterpriseDomain, grantToken, piAiGrantRecord } from './grant.ts'
+import { createModelFilter, fullModelIds, InvalidHiddenModelsError, validateHiddenModels } from './hidden-models.ts'
 
 /** The slice of the Harness credential service this plugin uses. */
 export type CredentialStore = Pick<CredentialProvider, 'readRecord' | 'modifyRecord' | 'deleteRecord'>
 
-/** Where `enterpriseUrl` lives: the plugin's live Config, persisted in the profile's `cordis.patch.yml`. */
-export interface EnterpriseUrlConfig {
+/** Live bridge configuration, persisted in the profile's `cordis.patch.yml`. */
+export interface BridgeConfig {
   /** Saved value; empty when github.com is used. */
   read(): string
   /** Whether `write` can persist (needs the settings service and a profile entry). */
   writable(): boolean
   /** Persist a normalized host, or remove the field for github.com. */
   write(host: string | undefined): Promise<void>
+  readHidden(): readonly string[]
+  /** Remove the key when undefined. */
+  writeHidden(ids: readonly string[] | undefined): Promise<void>
 }
 
 export interface AuthControllerDeps {
   /** The credential service, or undefined while it is not mounted. */
   readonly credentials: () => CredentialStore | undefined
-  readonly config: EnterpriseUrlConfig
+  readonly config: BridgeConfig
   readonly startDeviceFlow: (enterpriseDomain?: string) => Promise<DeviceAuthorization>
   readonly pollDeviceFlow: (device: DeviceAuthorization) => Promise<PollResult>
   readonly logger: { info(message: string): void; warn(message: string): void; error(error: unknown): void }
@@ -35,6 +39,9 @@ export interface AuthControllerDeps {
 
 export interface AuthController {
   status(): Promise<AuthStatus>
+  /** Re-apply after a credential write or a live config update. */
+  syncModels(): Promise<void>
+  setHiddenModels(input: unknown): Promise<AuthStatus>
   /** Start (or resume) a device flow; answers the already-authenticated status when signed in. */
   login(): Promise<AuthStatus>
   logout(): Promise<AuthStatus>
@@ -57,6 +64,7 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
   let flow: Flow = { state: 'signed-out' }
   let generation = 0
   let timer: unknown
+  const models = createModelFilter(deps.credentials, deps.config, message => deps.logger.warn(message))
 
   /** Configured enterprise host; an invalid saved value is reported, not silently replaced by github.com. */
   const configuredDomain = (): string | undefined => normalizeEnterpriseDomain(deps.config.read())
@@ -90,7 +98,17 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
     }
   }
 
+  const resetHiddenModels = async (): Promise<void> => {
+    try {
+      await models.synchronize()
+      await deps.config.writeHidden(undefined)
+    } catch (error) {
+      deps.logger.warn(`Could not reset hidden models: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   const status = async (): Promise<AuthStatus> => {
+    await models.synchronize()
     const record = await readGrant()
     const base = {
       provider: PI_AI_PROVIDER,
@@ -102,13 +120,14 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
       return { ...base, authenticated: false, ...(flow.state === 'authenticated' ? { state: 'signed-out' } : flow) }
     }
     const signedInHost = grantEnterpriseDomain(record) ?? GITHUB_DOTCOM
-    const modelIds = grantModelIds(record)
+    const modelIds = fullModelIds(record)
     return {
       ...base,
       authenticated: true,
       state: 'authenticated',
       ...(signedInHost === base.githubHost ? {} : { signedInHost }),
-      ...(modelIds === undefined ? {} : { modelCount: modelIds.length }),
+      hiddenModels: [...new Set(deps.config.readHidden())].filter(id => modelIds === undefined || modelIds.includes(id)),
+      ...(modelIds === undefined ? {} : { modelCount: modelIds.length, availableModels: [...modelIds].sort() }),
     }
   }
 
@@ -135,6 +154,7 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
         case 'done':
           try {
             await storeToken(result.token, device.domain === GITHUB_DOTCOM ? undefined : device.domain)
+            await resetHiddenModels()
             finish('authenticated')
             deps.logger.info(`GitHub Copilot sign-in at ${device.domain} completed; the ${PI_AI_PROVIDER} route can now authenticate`)
           } catch (error) {
@@ -165,6 +185,7 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
     stopPolling()
     flow = { state: 'signed-out' }
     await credentials.deleteRecord(recordKey())
+    await resetHiddenModels()
     return status()
   }
 
@@ -181,5 +202,20 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
     return status()
   }
 
-  return { status, login, logout, setEnterpriseUrl, dispose: stopPolling }
+  const setHiddenModels = async (input: unknown): Promise<AuthStatus> => {
+    const hidden = validateHiddenModels(input)
+    if (!deps.config.writable()) throw new Error('saving hidden models needs the settings service and a profile entry')
+    await models.synchronize()
+    const full = fullModelIds(await readGrant())
+    if (full !== undefined && hidden.some(id => !full.includes(id))) {
+      throw new InvalidHiddenModelsError('hiddenModels contains an id not in the account model list')
+    }
+    await deps.config.writeHidden(hidden.length === 0 ? undefined : hidden)
+    return status()
+  }
+
+  return {
+    status, login, logout, setEnterpriseUrl, setHiddenModels, syncModels: () => models.synchronize(),
+    dispose() { stopPolling(); models.dispose() },
+  }
 }

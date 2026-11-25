@@ -18,9 +18,10 @@ import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
-import { API_BASE, PI_AI_PROVIDER, type ApiEnvelope, type AuthStatus, type EnterpriseUrlRequest } from '../shared/contract.ts'
-import { createAuthController, type AuthController, type EnterpriseUrlConfig } from './auth-controller.ts'
+import { PI_AI_PROVIDER, PI_AI_RECORD_KEY, type AuthStatus } from '../shared/contract.ts'
+import { createAuthController, type AuthController, type BridgeConfig } from './auth-controller.ts'
 import { pollDeviceFlow, startDeviceFlow } from './device-flow.ts'
+import { authRoutes } from './routes.ts'
 
 export const name = 'copilot-bridge'
 
@@ -30,9 +31,14 @@ export const inject: string[] = []
 export interface Config {
   /** GitHub Enterprise URL or host (e.g. `https://octocorp.ghe.com/`); blank means github.com. */
   enterpriseUrl: Volatile<string>
+  hiddenModels: Volatile<string[]>
 }
 
 export const Config: z<Config> = z.object({
+  hiddenModels: z.array(z.string())
+    .description('GitHub Copilot model ids hidden from model selection. Cleared on sign-out and sign-in.')
+    .default([])
+    .volatile(),
   enterpriseUrl: z.string()
     .description('GitHub Enterprise URL or host, e.g. https://octocorp.ghe.com/. Leave blank for github.com.')
     .default('')
@@ -41,11 +47,20 @@ export const Config: z<Config> = z.object({
 
 const ENTERPRISE_URL_FIELD = 'enterpriseUrl'
 
-function enterpriseUrlConfig(ctx: Context, config: Config): EnterpriseUrlConfig {
+function bridgeConfig(ctx: Context, config: Config): BridgeConfig {
   const entryId = ctx.fiber.entry?.options.id
   return {
     read: () => config.enterpriseUrl.get() ?? '',
     writable: () => entryId !== undefined && ctx.get('settings') !== undefined,
+    readHidden: () => config.hiddenModels.get() ?? [],
+    async writeHidden(ids) {
+      const settings = ctx.get('settings')
+      if (settings === undefined || entryId === undefined) {
+        throw new Error('saving hidden models needs the settings service and a profile entry')
+      }
+      if (ids === undefined) await settings.mutate(entryId, [{ op: 'unset', path: ['hiddenModels'] }])
+      else await settings.update(entryId, { hiddenModels: [...ids] })
+    },
     async write(host) {
       const settings = ctx.get('settings')
       if (settings === undefined || entryId === undefined) {
@@ -59,47 +74,13 @@ function enterpriseUrlConfig(ctx: Context, config: Config): EnterpriseUrlConfig 
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
-function json<T>(status: number, payload: ApiEnvelope<T>): Response {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
-  })
-}
-
-function route<T>(action: (request: Request) => Promise<T>): (request: Request) => Promise<Response> {
-  return async request => {
-    try {
-      return json(200, { ok: true, value: await action(request) })
-    } catch (error) {
-      return json(500, { ok: false, error: errorMessage(error) })
-    }
-  }
-}
-
-async function readEnterpriseUrlRequest(request: Request): Promise<string> {
-  const body: unknown = await request.json()
-  const value = typeof body === 'object' && body !== null ? (body as Partial<EnterpriseUrlRequest>).enterpriseUrl : undefined
-  if (typeof value !== 'string') throw new Error('request body must be {"enterpriseUrl": string}')
-  return value
-}
-
 function registerRoutes(ctx: Context, auth: AuthController): void {
   // `connection.fetch` routes run only after the shared `/api` channel applied its
   // trust and authentication policy; `webServer.register` would be unauthenticated.
   ctx.inject(['connection'], connectionCtx => {
     connectionCtx.effect(() => {
       const { fetch } = connectionCtx.connection
-      const disposers = [
-        fetch.register({ path: `${API_BASE}/status`, methods: ['GET'], requestBody: 'buffered', fetch: route(() => auth.status()) }),
-        fetch.register({ path: `${API_BASE}/login`, methods: ['POST'], requestBody: 'buffered', fetch: route(() => auth.login()) }),
-        fetch.register({ path: `${API_BASE}/logout`, methods: ['POST'], requestBody: 'buffered', fetch: route(() => auth.logout()) }),
-        fetch.register({
-          path: `${API_BASE}/enterprise-url`,
-          methods: ['POST'],
-          requestBody: 'buffered',
-          fetch: route(async request => auth.setEnterpriseUrl(await readEnterpriseUrlRequest(request))),
-        }),
-      ]
+      const disposers = authRoutes(auth).map(route => fetch.register(route))
       return async () => {
         for (const dispose of disposers.reverse()) await dispose()
       }
@@ -133,6 +114,7 @@ function statusText(status: AuthStatus): string {
     status.modelCount === undefined
       ? 'The model list is populated by that provider on its first request.'
       : `Models available to this account: ${status.modelCount}`,
+    ...(status.hiddenModels?.length ? [`Hidden from model selection: ${status.hiddenModels.length}`] : []),
   ].join('\n')
 }
 
@@ -177,7 +159,7 @@ function registerCommands(ctx: Context, auth: AuthController): void {
 export function apply(ctx: Context, config: Config): void {
   const auth = createAuthController({
     credentials: () => ctx.get('credentials'),
-    config: enterpriseUrlConfig(ctx, config),
+    config: bridgeConfig(ctx, config),
     startDeviceFlow,
     pollDeviceFlow,
     logger: {
@@ -187,6 +169,10 @@ export function apply(ctx: Context, config: Config): void {
     },
   })
   ctx.effect(() => () => auth.dispose(), `${name}: stop device-flow polling`)
+  const syncModels = () => { void auth.syncModels().catch(error => ctx.logger.warn(`${name}: model filtering failed: ${errorMessage(error)}`)) }
+  ctx.on('credentials/record-updated', key => { if (key === PI_AI_RECORD_KEY) syncModels() })
+  ctx.on('loader/volatile-update', paths => { if (paths.some(path => path[0] === 'hiddenModels')) syncModels() })
+  ctx.inject(['credentials'], () => { syncModels() })
 
   // This plugin ships its own Settings page; hide the generated form.
   ctx.inject(['settings'], settingsCtx => {

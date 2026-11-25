@@ -20,4 +20,6 @@ export const css = {
   codeRow: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
   code: { width: '180px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', letterSpacing: '2px', fontWeight: 600 },
   versionLink: { color: 'var(--dsw-alias-brand-primary)' },
+  modelList: { maxHeight: 240, overflowY: 'auto', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8, padding: 8 },
+  modelRow: { padding: '6px 4px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 13, overflowWrap: 'anywhere' },
 } satisfies Record<string, CSSProperties>

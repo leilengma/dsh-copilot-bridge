@@ -43,6 +43,15 @@ export interface AuthStatus {
   readonly message?: string
   /** Models the Harness route recorded as available to this account. */
   readonly modelCount?: number
+  /** Full, unfiltered account catalog, sorted; absent until recorded by pi-ai. */
+  readonly availableModels?: readonly string[]
+  /** Saved hidden ids, after pruning; only present when authenticated. */
+  readonly hiddenModels?: readonly string[]
+}
+
+/** Body of `POST /hidden-models`. An empty array removes the config key. */
+export interface HiddenModelsRequest {
+  readonly hiddenModels: readonly string[]
 }
 
 /** Body of `POST /enterprise-url`. An empty string resets to github.com. */
