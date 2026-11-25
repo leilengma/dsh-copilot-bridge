@@ -2,7 +2,7 @@
 
 GitHub Copilot sign-in for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), on github.com **or a GitHub Enterprise host** such as `https://<company>.ghe.com/`.
 
-It is a TypeScript re-implementation of [`@lujianjun19/dsh-llm-github-copilot`](https://github.com/lujianjun19/dsh-llm-github-copilot) with the same Settings page and commands. It adds a **GitHub host** field: you enter your Enterprise URL, click **Save**, and the plugin writes it to the profile's configuration file.
+It provides a Settings page and commands for sign-in, with a **GitHub host** field: you enter your Enterprise URL, click **Save**, and the plugin writes it to the profile's configuration file.
 
 The plugin only handles sign-in. It runs the OAuth device flow against the configured host and stores the long-lived credential in the Harness credential store under `llm-pi-ai` / `github-copilot`, together with `enterpriseUrl` when a host is set. The built-in `github-copilot` model route reads that record, refreshes short-lived Copilot tokens from `api.<host>`, and lists the models available to your account.
 
@@ -15,7 +15,7 @@ alias dsh="'/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bi
 dsh plugin --profile desktop add github:leilengma/dsh-copilot-bridge
 ```
 
-Restart the app. If `@lujianjun19/dsh-llm-github-copilot` is installed in the same profile, remove it first so you don't get two Copilot Settings pages: `dsh plugin --profile desktop remove @lujianjun19/dsh-llm-github-copilot`.
+Restart the app.
 
 ## Use
 
