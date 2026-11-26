@@ -5,7 +5,6 @@ import { api, errorMessage } from './api.ts'
 import { DeviceCodeField, StateLabel } from './components.tsx'
 import { text, useLocaleRevision } from './i18n.ts'
 import { css } from './styles.ts'
-import { HiddenModelsCard } from './hidden-models-card.tsx'
 
 declare const __PLUGIN_VERSION__: string
 const REPOSITORY = 'https://github.com/leilengma/dsh-copilot-bridge'
@@ -126,12 +125,6 @@ export function CopilotSettings() {
       setAcknowledged(false)
     }
   }
-  const saveHiddenModels = async (ids: readonly string[]): Promise<void> => {
-    setBusy(true)
-    setError(undefined)
-    try { setStatus(await api.setHiddenModels(ids)) }
-    finally { setBusy(false) }
-  }
   const copy = async () => { if (await writeClipboard(status?.userCode ?? '')) setCopied(true) }
 
   const pending = status?.state === 'pending'
@@ -182,8 +175,6 @@ export function CopilotSettings() {
           )
           : null}
       </div>
-
-      {authenticated ? <HiddenModelsCard status={status} busy={busy} onSave={saveHiddenModels} /> : null}
 
       <p style={css.hint}>{text('commandHint')}</p>
       <p style={css.hint}>

@@ -23,7 +23,9 @@ Restart the app.
 2. Under **GitHub host**, enter your Enterprise URL (for example `https://octocorp.ghe.com/`) and click **Save**. The input shows the saved value as its placeholder. **Use github.com** clears it.
 3. Click **Sign in to GitHub Copilot**, open the device page (`https://<host>/login/device`) and enter the code shown.
 4. In **Settings → Models**, add or select the `github-copilot` provider. Leave its API key blank. The card shows a notice that no API key is needed and that you only need to click **Apply**. If you are not signed in yet, the notice tells you to sign in first.
-5. After the provider's first request populates its model list, return to **Settings → GitHub Copilot → Model visibility**. Check **Hide** beside a raw model id to remove it from model selection; uncheck to restore it. Changes save immediately. The case-insensitive text filter only narrows this list, not the saved selection. Counts always describe the whole account, with a shown count while filtering.
+5. After the provider's first request populates its model list, open **Plugins** in the sidebar and choose **GitHub Copilot**. The leftmost **eye** button controls whether a model appears in model selection: an open eye means visible; a crossed-out eye means hidden. Click again to restore it. Changes save immediately. Search matches model names and ids without changing the saved selection; counts always describe the whole account, with a shown count while searching.
+
+The Plugins table includes context size and input capabilities from Harness metadata, even for hidden models. Missing metadata is shown as **—**, never guessed. Harness does not expose prices or tool-support flags; costs remain **—**, not zero. There are no Add Models or Install Model Providers actions. **Settings → GitHub Copilot** is reserved for authentication and the Enterprise host.
 
 The `/copilot-login`, `/copilot-status` and `/copilot-logout` commands work on chat surfaces too. Status includes the hidden count when nonzero.
 
@@ -51,7 +53,7 @@ Harness 0.2.2-rc.5 advertises a static pi-ai catalog without reading the grant's
 
 Every sign-out and completed sign-in **unsets `hiddenModels`**, regardless of account identity; visibility choices are not remembered per account. A reset write failure is logged without failing authentication/sign-out.
 
-Hiding the model a session is using is allowed: its next request fails with `UNKNOWN_MODEL` and its picker shows **Select model**. Hiding every model removes the `github-copilot` group from the picker. Settings controls are read-only when the settings service or profile entry is unavailable.
+Hiding the model a session is using is allowed: its next request fails with `UNKNOWN_MODEL` and its picker shows **Select model**. Hiding every model removes the `github-copilot` group from the picker. Visibility controls are read-only when the settings service or profile entry is unavailable; search still works.
 
 ## Development
 
@@ -63,7 +65,8 @@ npm run check        # tsc --noEmit, esbuild bundle to lib/, node --test (type-s
 ```
 
 - `src/host/`: Host plugin. Device flow, auth controller, credential grant, model-selection compatibility filter, `/api/copilot-bridge/*` routes, commands and config writes.
-- `src/client/`: React Settings page, login dialog and logout confirmation.
+- `src/client/`: Plugins model table, React auth Settings page, login dialog and logout confirmation.
+- Authenticated `GET /api/copilot-bridge/models` returns the full account model list plus display-only metadata, including hidden models; it never includes credential payloads or uses the filtered picker list.
 - `src/shared/contract.ts`: request and response types shared by the Host and the client.
 
 `lib/` is committed so that `github:` installs work without a build step. Run `npm run build` before you commit.

@@ -2,6 +2,8 @@ import type { ConnectionFetchRoute } from '@deepseek-ai/dsh-client-connection'
 import { API_BASE, type ApiEnvelope, type EnterpriseUrlRequest } from '../shared/contract.ts'
 import type { AuthController } from './auth-controller.ts'
 import { InvalidHiddenModelsError } from './hidden-models.ts'
+import { modelCatalog } from './model-catalog.ts'
+import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
@@ -30,9 +32,10 @@ async function readEnterpriseUrlRequest(request: Request): Promise<string> {
 }
 
 /** Registered exclusively on the authenticated connection.fetch channel. */
-export function authRoutes(auth: AuthController): ConnectionFetchRoute[] {
+export function authRoutes(auth: AuthController, runtime: () => Pick<LlmRuntime, 'resolveModelInfo'> | undefined = () => undefined): ConnectionFetchRoute[] {
   return [
     { path: `${API_BASE}/status`, methods: ['GET'], requestBody: 'buffered', fetch: route(() => auth.status()) },
+    { path: `${API_BASE}/models`, methods: ['GET'], requestBody: 'buffered', fetch: route(async () => modelCatalog(await auth.status(), runtime())) },
     { path: `${API_BASE}/login`, methods: ['POST'], requestBody: 'buffered', fetch: route(() => auth.login()) },
     { path: `${API_BASE}/logout`, methods: ['POST'], requestBody: 'buffered', fetch: route(() => auth.logout()) },
     {

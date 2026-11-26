@@ -81,7 +81,7 @@ function registerRoutes(ctx: Context, auth: AuthController): void {
   ctx.inject(['connection'], connectionCtx => {
     connectionCtx.effect(() => {
       const { fetch } = connectionCtx.connection
-      const disposers = authRoutes(auth).map(route => fetch.register(route))
+      const disposers = authRoutes(auth, () => ctx.get('llm')).map(route => fetch.register(route))
       return async () => {
         for (const dispose of disposers.reverse()) await dispose()
       }

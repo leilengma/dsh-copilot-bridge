@@ -19,6 +19,9 @@ class StaticCatalog extends LlmAdapter {
   override async listModels(provider: string) {
     return ['a', 'b', 'A'].map(id => ({ provider, id, name: `Model ${id}`, inputModalities: ['text' as const] }))
   }
+  override async resolveModel(provider: string, model: string) {
+    return { provider, id: model, name: `Model ${model}`, inputModalities: ['text' as const] }
+  }
   override async *stream() { throw new Error('test must not make model requests') }
 }
 
@@ -105,6 +108,19 @@ test('Host mount, pi-ai record events, and volatile YAML edits re-filter without
   assert.equal(status.configWritable, false)
   assert.deepEqual(status.hiddenModels, ['a'])
   assert.deepEqual(hiddenModels.get(), ['a', 'removed'])
+  const runtime = new LlmRuntime(ctx)
+  runtime.registerAdapter(['github-copilot'], new StaticCatalog())
+  await settle()
+  const modelsRoute = routes.get('/api/copilot-bridge/models')
+  assert.ok(modelsRoute)
+  const catalogResponse = await modelsRoute.fetch(new Request('https://localhost/api/copilot-bridge/models'))
+  assert.equal(catalogResponse.status, 200)
+  const catalog = (await catalogResponse.json()).value
+  assert.deepEqual(catalog.models, [
+    { id: 'a', name: 'Model a', inputModalities: ['text'] },
+    { id: 'b', name: 'Model b', inputModalities: ['text'] },
+  ], 'the authenticated management route must retain hidden account models without grant secrets')
+  assert.deepEqual((await ctx.llm.listModels('github-copilot')).map(model => model.id), ['b', 'A'])
 
   record = { kind: 'grant', payload: { refresh: 'ghu_test', availableModelIds: ['a', 'b', 'c'] } }
   ctx.emit('credentials/record-updated', PI_AI_RECORD_KEY)

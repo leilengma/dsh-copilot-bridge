@@ -1,4 +1,4 @@
-import { API_BASE, type ApiEnvelope, type AuthStatus, type EnterpriseUrlRequest, type HiddenModelsRequest } from '../shared/contract.ts'
+import { API_BASE, type ApiEnvelope, type AuthStatus, type EnterpriseUrlRequest, type HiddenModelsRequest, type ModelCatalog } from '../shared/contract.ts'
 
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -20,6 +20,7 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
 /** Typed client for the Host routes in `src/host/index.ts`. */
 export const api = {
   status: () => call<AuthStatus>('/status'),
+  models: () => call<ModelCatalog>('/models'),
   login: () => call<AuthStatus>('/login', { method: 'POST' }),
   logout: () => call<AuthStatus>('/logout', { method: 'POST' }),
   setHiddenModels: (hiddenModels: readonly string[]) => {

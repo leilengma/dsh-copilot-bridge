@@ -34,6 +34,11 @@ async function main() {
     },
     async deleteRecord() { record = undefined },
   })
+  const routes = new Map()
+  ctx.provide('connection', { fetch: { register(route) {
+    routes.set(route.path, route)
+    return async () => { routes.delete(route.path) }
+  } } })
   const fiber = ctx.plugin(bridge, { hiddenModels: [hidden] })
   try {
     await settle()
@@ -41,7 +46,17 @@ async function main() {
     assert.ok(!models.some(model => model.id === hidden), 'hidden model is still visible in the installed picker catalog')
     assert.equal(models.length, baseline.length - 1)
     assert.ok(!record.payload.availableModelIds.includes(hidden), 'grant filtering must still work')
-    console.log(JSON.stringify({ baseline: baseline.length, filtered: models.length, hiddenOmitted: true }))
+    const response = await routes.get('/api/copilot-bridge/models').fetch(new Request('https://localhost/api/copilot-bridge/models'))
+    assert.equal(response.status, 200)
+    const catalog = (await response.json()).value
+    assert.equal(catalog.models.length, baseline.length, 'management must include hidden rows')
+    const row = catalog.models.find(model => model.id === hidden)
+    assert.ok(row, 'a hidden model must remain restorable in Plugins')
+    assert.notEqual(row.name, row.id, 'resolve actual display metadata from the installed pi-ai adapter')
+    assert.ok(row.contextWindow > 0)
+    assert.ok(row.inputModalities.includes('image'))
+    assert.ok(!JSON.stringify(catalog).includes('fixture-only'), 'never expose grant secrets')
+    console.log(JSON.stringify({ baseline: baseline.length, filtered: models.length, hiddenOmitted: true, management: catalog.models.length, hiddenMetadata: { name: row.name, contextWindow: row.contextWindow } }))
     await fiber.dispose()
     assert.equal((await consumer.listModels('github-copilot')).length, baseline.length, 'unload must restore the catalog')
     console.log('PASS: installed pi-ai adapter + LLM service + bridge; catalog restored on unload')

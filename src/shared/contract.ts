@@ -49,6 +49,20 @@ export interface AuthStatus {
   readonly hiddenModels?: readonly string[]
 }
 
+/** Display-only metadata; missing values are unknown, never inferred capabilities or prices. */
+export interface CopilotModel {
+  readonly id: string
+  readonly name: string
+  readonly contextWindow?: number
+  readonly inputModalities?: readonly ('text' | 'image' | 'audio' | 'video')[]
+}
+
+/** Full account catalog for management, including models excluded from the picker. */
+export interface ModelCatalog {
+  readonly status: AuthStatus
+  readonly models: readonly CopilotModel[]
+}
+
 /** Body of `POST /hidden-models`. An empty array removes the config key. */
 export interface HiddenModelsRequest {
   readonly hiddenModels: readonly string[]
