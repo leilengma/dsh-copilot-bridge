@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { ModelCatalog } from '../shared/contract.ts'
+import type { AuthStatus, ModelCatalog } from '../shared/contract.ts'
 import { api, errorMessage } from './api.ts'
 import { ModelsTable } from './hidden-models-card.tsx'
 import { text, useLocaleRevision } from './i18n.ts'
@@ -8,13 +8,8 @@ import { modelCss } from './model-styles.ts'
 import { authRevision } from './store.ts'
 import { css } from './styles.ts'
 
-/** Plugins list entries are rendered once as a summary and again as their own detail page. */
-export function CopilotModelsEntry({ view }: { readonly view: 'summary' | 'page' }) {
-  useLocaleRevision()
-  return view === 'summary' ? <>{text('modelsSummary')}</> : <CopilotModelsPage />
-}
-
-function CopilotModelsPage() {
+/** Mounted only while the signed-in user is viewing the Models tab. */
+export function CopilotModelsPage({ onStatusChange }: { readonly onStatusChange: (status: AuthStatus) => void }) {
   useLocaleRevision()
   const revision = useSyncExternalStore(authRevision.subscribe, authRevision.getSnapshot, authRevision.getSnapshot)
   const [catalog, setCatalog] = useState<ModelCatalog>()
@@ -23,32 +18,46 @@ function CopilotModelsPage() {
   const [saveError, setSaveError] = useState<string>()
   const [retry, setRetry] = useState(0)
   const saving = useRef(false)
+  const mounted = useRef(false)
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
 
   useEffect(() => {
     if (busy) return
     let alive = true
     api.models().then(
-      value => { if (alive) { setCatalog(value); setLoadError(undefined) } },
+      value => {
+        if (!alive || revision !== authRevision.getSnapshot()) return
+        setCatalog(value)
+        setLoadError(undefined)
+        if (!value.status.authenticated) onStatusChange(value.status)
+      },
       (cause: unknown) => { if (alive) setLoadError(errorMessage(cause)) },
     )
     return () => { alive = false }
-  }, [revision, retry, busy])
+  }, [revision, retry, busy, onStatusChange])
 
   const save = async (ids: readonly string[]) => {
     // Also guard the interval before React commits disabled buttons.
     if (saving.current) return
     saving.current = true
+    const saveRevision = authRevision.getSnapshot()
+    const current = () => mounted.current && saveRevision === authRevision.getSnapshot()
     setBusy(true)
     setSaveError(undefined)
     try {
       const status = await api.setHiddenModels(ids)
+      if (!current()) return
       setCatalog(current => current === undefined ? current : { ...current, status })
+      if (!status.authenticated) onStatusChange(status)
     } catch (cause) {
       // Retain the previous confirmed eye state and keep failures inline.
-      setSaveError(errorMessage(cause))
+      if (current()) setSaveError(errorMessage(cause))
     } finally {
       saving.current = false
-      setBusy(false)
+      if (mounted.current) setBusy(false)
     }
   }
 

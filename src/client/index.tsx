@@ -1,14 +1,13 @@
 /**
- * dsh-copilot-bridge Web client: the Plugins model table, the Settings section (sign-in plus the GitHub
- * Enterprise URL editor), the `/copilot-login` device-code dialog, and the
+ * dsh-copilot-bridge Web client: the Plugins Account/Models tabs,
+ * the `/copilot-login` device-code dialog, and the
  * `/copilot-logout` confirmation.
  */
 import type { ClientContext } from './harness.ts'
 import { PI_AI_RECORD_KEY } from '../shared/contract.ts'
-import { CopilotNavIcon, LoginDialog } from './components.tsx'
+import { LoginDialog } from './components.tsx'
 import { DICTIONARIES, LOCALE_NS, bindLocale, text } from './i18n.ts'
-import { CopilotSettings } from './settings-page.tsx'
-import { CopilotModelsEntry } from './models-page.tsx'
+import { CopilotPluginEntry } from './plugin-page.tsx'
 import { CopilotProviderCardNotice } from './provider-card.tsx'
 import { bumpAuthRevision, closeLoginDialogWhenAuthenticated, showLoginResult } from './store.ts'
 
@@ -82,20 +81,7 @@ export function apply(ctx: ClientContext): void {
     order: 20,
     locale: LOCALE_NS,
     label: () => text('nav'),
-  }, CopilotModelsEntry))
-
-  ctx.slots.inject('settings.section', () => ctx.slots.register({
-    name: 'settings.section',
-    id: SECTION_ID,
-    order: 11,
-    locale: LOCALE_NS,
-    label: () => text('nav'),
-  }, CopilotSettings))
-
-  ctx.slots.inject('settings.section.icon', () => ctx.slots.register({
-    name: 'settings.section.icon',
-    id: SECTION_ID,
-  }, CopilotNavIcon))
+  }, CopilotPluginEntry))
 
   // Models page: tell the user the github-copilot card needs no API key. The
   // slot is keyed by adapter namespace, so the entry receives every pi-ai

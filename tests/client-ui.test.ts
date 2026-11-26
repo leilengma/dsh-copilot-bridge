@@ -3,6 +3,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { buildSync } from 'esbuild'
+import type { CopilotPluginTabs } from '../src/client/plugin-page.tsx'
 import type { ModelsTable } from '../src/client/hidden-models-card.tsx'
 
 type TableProps = Parameters<typeof ModelsTable>[0]
@@ -12,6 +13,7 @@ const compiled = buildSync({
   stdin: { contents: `
     import { createElement } from 'react'
     import { renderToStaticMarkup } from 'react-dom/server'
+    import { CopilotPluginTabs } from './src/client/plugin-page.tsx'
     import { ModelsTable } from './src/client/hidden-models-card.tsx'
     import { apply } from './src/client/index.tsx'
     import { authRevision } from './src/client/store.ts'
@@ -25,6 +27,7 @@ const compiled = buildSync({
     })
     export const registrations = slots.map(({slot}) => ({ name: slot.name, id: slot.id, label: slot.label?.() }))
     export const summary = renderToStaticMarkup(createElement(slots.find(({slot}) => slot.name === 'plugins.item').component, { view: 'summary' }))
+    export const renderTabs = props => renderToStaticMarkup(createElement(CopilotPluginTabs, props))
     export const renderTable = props => renderToStaticMarkup(createElement(ModelsTable, props))
     export const getRevision = authRevision.getSnapshot
     export const subscribeToRevision = authRevision.subscribe
@@ -43,6 +46,7 @@ const ui = bundled.exports as {
   getRevision: () => number
   subscribeToRevision: (listener: () => void) => () => void
   emitRemote: (event: string, key: string) => void
+  renderTabs: (props: Parameters<typeof CopilotPluginTabs>[0]) => string
   renderTable: (props: TableProps) => string
 }
 
@@ -57,11 +61,29 @@ const props: TableProps = {
   ],
 }
 
-test('client registers GitHub Copilot inside Plugins and retains the auth Settings entry', () => {
+test('client registers GitHub Copilot only inside Plugins, not a separate Settings section', () => {
   assert.deepEqual(ui.registrations.find(slot => slot.name === 'plugins.item'), { name: 'plugins.item', id: 'copilot-bridge-models', label: 'GitHub Copilot' })
-  assert.ok(ui.registrations.some(slot => slot.name === 'settings.section' && slot.id === 'copilot-bridge'))
-  assert.match(ui.summary, /Search GitHub Copilot models/)
+  assert.equal(ui.registrations.some(slot => slot.name === 'settings.section' && slot.id === 'copilot-bridge'), false)
+  assert.equal(ui.registrations.some(slot => slot.name === 'settings.section.icon' && slot.id === 'copilot-bridge'), false)
+  assert.match(ui.summary, /account|Account/)
+  assert.match(ui.summary, /models/)
   assert.doesNotMatch(ui.summary, /<table|<input/)
+})
+
+test('Account owns sign-in and host controls; Models is absent until authentication succeeds', () => {
+  for (const auth of [undefined, { ...status, authenticated: false, state: 'signed-out' as const }, { ...status, authenticated: false, state: 'pending' as const }]) {
+    const html = ui.renderTabs({ status: auth, tab: 'models', onTabChange: () => {}, onStatusChange: () => {} })
+    assert.match(html, /role="tab"[^>]*aria-selected="true"[^>]*>Account</)
+    assert.doesNotMatch(html, />Models<|Loading models|<table/)
+    assert.match(html, /GitHub Enterprise URL/)
+  }
+  const html = ui.renderTabs({ status, tab: 'account', onTabChange: () => {}, onStatusChange: () => {} })
+  assert.match(html, />Models</)
+  assert.match(html, /Sign out/)
+  assert.match(html, /GitHub Enterprise URL/)
+  const models = ui.renderTabs({ status, tab: 'models', onTabChange: () => {}, onStatusChange: () => {} })
+  assert.match(models, /role="tab"[^>]*aria-selected="true"[^>]*>Models</)
+  assert.match(models, /Loading models/)
 })
 
 test('model table exposes accessible eye toggles, search and real metadata without invented costs', () => {

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Consolidate GitHub Copilot under **Plugins → GitHub Copilot** with **Account** and **Models** tabs. Move authentication and Enterprise host configuration out of Settings; show Models only while signed in, and return to Account on sign-out. Update sign-in guidance in English and Chinese.
+
 - Enrich the Plugins model table with live Copilot credit prices (including long-context tiers), active discount badges and informational **Retiring** warnings. Read metadata host-side using the route-owned access token, with bounded caching, proxy support and fail-open missing data; model eligibility and visibility are unchanged.
 
 - Move model visibility from Settings into **Plugins → GitHub Copilot**: searchable model table with immediate-save eye toggles, context size and available input capabilities. Preserve hidden rows for restoration and show unavailable costs/metadata as **—**. Settings retains authentication and Enterprise host configuration.

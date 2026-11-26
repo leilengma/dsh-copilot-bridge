@@ -41,10 +41,8 @@ export interface ProviderCardProps {
 /** `@deepseek-ai/dsh-client-ui-renderer`: the UI slot registry. */
 export interface SlotRegistry {
   register(slot: SlotBase & { readonly name: 'conversation.input.overlay' }, component: ComponentType): Dispose
-  register(slot: SlotBase & { readonly name: 'settings.section'; readonly label: () => string }, component: ComponentType): Dispose
   /** Plugins page list item: summary on its card, page when the card is opened. */
   register(slot: SlotBase & { readonly name: 'plugins.item'; readonly label: () => string }, component: ComponentType<{ readonly view: 'summary' | 'page' }>): Dispose
-  register(slot: { readonly name: 'settings.section.icon'; readonly id: string }, component: ComponentType<{ size?: number }>): Dispose
   /** Keyed slot: one entry per `key` and `priority`; a second entry at an occupied cell throws. */
   register(slot: {
     readonly name: 'settings.models.provider-card'

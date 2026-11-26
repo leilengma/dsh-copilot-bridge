@@ -4,6 +4,7 @@ import type { AuthStatus } from '../shared/contract.ts'
 import { api, errorMessage } from './api.ts'
 import { DeviceCodeField, StateLabel } from './components.tsx'
 import { text, useLocaleRevision } from './i18n.ts'
+import { authRevision } from './store.ts'
 import { css } from './styles.ts'
 
 declare const __PLUGIN_VERSION__: string
@@ -69,10 +70,12 @@ function EnterpriseUrlCard({ status, busy, onSave }: {
   )
 }
 
-/** The GitHub Copilot section of the Settings page. */
-export function CopilotSettings() {
+/** Account tab: parent-owned authentication status also gates the Models tab. */
+export function CopilotAccount({ status, onStatusChange }: {
+  readonly status: AuthStatus | undefined
+  readonly onStatusChange: (status: AuthStatus) => void
+}) {
   useLocaleRevision()
-  const [status, setStatus] = useState<AuthStatus>()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
   const [copied, setCopied] = useState(false)
@@ -84,7 +87,7 @@ export function CopilotSettings() {
     setBusy(true)
     setError(undefined)
     try {
-      setStatus(await action())
+      onStatusChange(await action())
       return true
     } catch (cause) {
       setError(errorMessage(cause))
@@ -95,22 +98,16 @@ export function CopilotSettings() {
   }
 
   const refresh = async () => {
+    const revision = authRevision.getSnapshot()
     try {
-      setStatus(await api.status())
+      const value = await api.status()
+      if (revision !== authRevision.getSnapshot()) return
+      onStatusChange(value)
       setError(undefined)
     } catch (cause) {
-      setError(errorMessage(cause))
+      if (revision === authRevision.getSnapshot()) setError(errorMessage(cause))
     }
   }
-
-  useEffect(() => {
-    let alive = true
-    api.status().then(
-      value => { if (alive) setStatus(value) },
-      (cause: unknown) => { if (alive) setError(errorMessage(cause)) },
-    )
-    return () => { alive = false }
-  }, [])
 
   useEffect(() => {
     if (status?.state !== 'pending') return
@@ -147,7 +144,7 @@ export function CopilotSettings() {
                 </Button>
               )
               : (
-                <Button variant="primary" disabled={busy || pending} onClick={() => { void act(api.login) }}>
+                <Button variant="primary" disabled={busy || pending || status === undefined} onClick={() => { void act(api.login) }}>
                   {busy ? text('requesting') : pending ? text('waiting') : text('signIn')}
                 </Button>
               )}
