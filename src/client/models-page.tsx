@@ -9,7 +9,7 @@ import { authRevision } from './store.ts'
 import { css } from './styles.ts'
 
 /** Catalog view keeps the last good rows visible during discovery and retryable failures. */
-export function ModelsDisplay({ catalog, loading, busy, loadError, saveError, onRefresh, onSave }: {
+export function ModelsDisplay({ catalog, loading, busy, loadError, saveError, onRefresh, onSave, onSavePins }: {
   readonly catalog: ModelCatalog | undefined
   readonly loading: boolean
   readonly busy: boolean
@@ -17,6 +17,7 @@ export function ModelsDisplay({ catalog, loading, busy, loadError, saveError, on
   readonly saveError?: string | undefined
   readonly onRefresh: () => void
   readonly onSave: (ids: readonly string[]) => Promise<void>
+  readonly onSavePins: (ids: readonly string[]) => Promise<void>
 }) {
   useLocaleRevision()
   const status = catalog?.status
@@ -34,7 +35,7 @@ export function ModelsDisplay({ catalog, loading, busy, loadError, saveError, on
       {discovering ? <p role="status" style={css.hint}>{text('loadingModels')}</p> : null}
       {status?.authenticated === false ? <p style={css.body}>{text('modelsSignIn')}</p> : null}
       {status?.authenticated === true && catalog !== undefined && (catalog.models.length > 0 || catalog.state === 'ready') ? <>
-        <ModelsTable status={status} models={catalog.models} busy={busy || discovering} onSave={onSave} />
+        <ModelsTable status={status} models={catalog.models} busy={busy || discovering} onSave={onSave} onSavePins={onSavePins} />
         {!status.configWritable ? <p style={css.hint}>{text('hiddenModelsReadOnly')}</p> : null}
         {!!status.hiddenModels?.length ? <p style={css.hint}>{text('hiddenModelsWarning')}</p> : null}
         <p style={css.hint}>{text('modelMetadataNote')}</p>
@@ -80,7 +81,7 @@ export function CopilotModelsPage({ onStatusChange }: { readonly onStatusChange:
     return () => { alive = false }
   }, [revision, retry, busy, onStatusChange])
 
-  const save = async (ids: readonly string[]) => {
+  const save = async (ids: readonly string[], preference: 'hidden' | 'pinned') => {
     // Also guard the interval before React commits disabled buttons.
     if (saving.current) return
     saving.current = true
@@ -89,12 +90,12 @@ export function CopilotModelsPage({ onStatusChange }: { readonly onStatusChange:
     setBusy(true)
     setSaveError(undefined)
     try {
-      const status = await api.setHiddenModels(ids)
+      const status = await (preference === 'hidden' ? api.setHiddenModels(ids) : api.setPinnedModels(ids))
       if (!current()) return
       setCatalog(current => current === undefined ? current : { ...current, status })
       if (!status.authenticated) onStatusChange(status)
     } catch (cause) {
-      // Retain the previous confirmed eye state and keep failures inline.
+      // Retain the confirmed visibility and pin states; the same action retries inline.
       if (current()) setSaveError(errorMessage(cause))
     } finally {
       saving.current = false
@@ -107,5 +108,5 @@ export function CopilotModelsPage({ onStatusChange }: { readonly onStatusChange:
     refreshRequested.current = true
     setRetry(value => value + 1)
   }
-  return <ModelsDisplay catalog={catalog} loading={loading} busy={busy} loadError={loadError} saveError={saveError} onRefresh={refresh} onSave={save} />
+  return <ModelsDisplay catalog={catalog} loading={loading} busy={busy} loadError={loadError} saveError={saveError} onRefresh={refresh} onSave={ids => save(ids, 'hidden')} onSavePins={ids => save(ids, 'pinned')} />
 }
