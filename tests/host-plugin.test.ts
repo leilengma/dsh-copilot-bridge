@@ -194,6 +194,27 @@ test('hide/reveal and all-hidden changes refresh only the bridge picker; routes 
   assert.deepEqual(h.credentialWrites, [])
 })
 
+test('a failed initial discovery does not turn picker notifications into a retry loop; manual refresh recovers', async t => {
+  const h = host(t)
+  const gate = deferred<Response>()
+  let attempts = 0
+  h.discover(async () => ++attempts > 3 ? gate.promise : new Response('unavailable', { status: 503 }))
+  h.ctx.on('llm/models-updated', provider => { void h.runtime.listModels(provider).catch(() => {}) })
+  try {
+    await settle()
+    assert.equal(attempts, 1, 'picker refetches must not automatically retry failed discovery')
+    assert.deepEqual(await h.picker(), [])
+    assert.equal(attempts, 1)
+    assert.equal((await h.request('models')).envelope.value.state, 'error')
+    h.discover(async () => Response.json(modelsPayload))
+    assert.equal((await h.request('models/refresh', {})).envelope.value.state, 'ready')
+    assert.deepEqual(await h.picker(), supported)
+  } finally {
+    await h.plugin.dispose()
+    gate.resolve(Response.json(modelsPayload))
+  }
+})
+
 test('manual refresh keeps the last good catalog and hidden ids after failure, then accepts known empty', async t => {
   const h = host(t, { hidden: ['mai-code-2'] })
   await h.picker()

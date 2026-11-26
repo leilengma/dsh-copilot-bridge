@@ -162,7 +162,11 @@ export function apply(ctx: Context, config: Config): void {
         const started = epoch
         const account = await readAccount()
         if (started !== epoch || disposed) throw new Error('Copilot account changed')
-        return account === undefined ? { generation: -1, models: [] } : catalog.ready()
+        if (account === undefined) return { generation: -1, models: [] }
+        const state = catalog.state()
+        // Picker refetches triggered by the error notification are not retry actions.
+        if (state.status === 'error' && catalog.snapshot() === undefined) throw new Error(state.error)
+        return catalog.ready()
       } },
       tokens, hidden: () => configStore.readHidden(),
       get loadImage() {
