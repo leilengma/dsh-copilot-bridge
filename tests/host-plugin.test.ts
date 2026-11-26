@@ -122,7 +122,7 @@ function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean;
   const plugin = mount()
   t.after(async () => { await ctx.fiber.dispose() })
   return {
-    ctx, plugin, mount, mountLlm, nativeList, records, updates, requests, credentialWrites, settingWrites, hiddenModels,
+    ctx, plugin, mount, mountLlm, nativeList, records, updates, requests, credentialWrites, settingWrites, hiddenModels, pinnedModels,
     get runtime() { return runtime }, get exchanges() { return exchanges },
     authorize(next: typeof authorize) { authorize = next },
     pollAuthorization(next: typeof pollAuthorization) { pollAuthorization = next },
@@ -322,8 +322,8 @@ test('manual refresh keeps the last good catalog and hidden ids after failure, t
   assert.deepEqual(await h.picker(), [])
 })
 
-test('sign-out discards discovery, clears hidden config, and empties the picker without changing native state', async t => {
-  const h = host(t, { hidden: ['mai-code-2'] })
+test('sign-out discards discovery, clears hidden and pinned config, and empties the picker without changing native state', async t => {
+  const h = host(t, { hidden: ['mai-code-2'], pinned: ['mai-code-2'] })
   const gate = deferred<Response>()
   h.discover(() => gate.promise)
   await settle()
@@ -332,8 +332,10 @@ test('sign-out discards discovery, clears hidden config, and empties the picker 
   const before = h.updates.length
   const logout = await h.request('logout', {})
   assert.equal(logout.envelope.value.authenticated, false)
+  assert.equal(logout.envelope.value.pinnedModels, undefined)
   assert.deepEqual(await h.picker(), [])
   assert.deepEqual(h.hiddenModels.get(), [])
+  assert.deepEqual(h.pinnedModels.get(), [])
   assert.ok(h.updates.length > before)
   gate.resolve(Response.json(modelsPayload))
   assert.deepEqual(await pending, [])
@@ -347,8 +349,8 @@ test('sign-out discards discovery, clears hidden config, and empties the picker 
   assert.deepEqual(await h.picker(), [])
 })
 
-test('host switch gates a preserved account, discards old discovery and resumes only for a matching signed-in host', async t => {
-  const h = host(t, { hidden: ['mai-code-2'] })
+test('host switch gates a preserved account, clears pins, discards old discovery and resumes only for a matching signed-in host', async t => {
+  const h = host(t, { hidden: ['mai-code-2'], pinned: ['mai-code-2'] })
   const gate = deferred<Response>()
   h.discover(() => gate.promise)
   await settle()
@@ -357,6 +359,7 @@ test('host switch gates a preserved account, discards old discovery and resumes 
   h.editHost('https://acme.ghe.com/')
   assert.deepEqual(await h.picker(), [])
   assert.deepEqual(h.hiddenModels.get(), [])
+  assert.deepEqual(h.pinnedModels.get(), [])
   const status = (await h.request('status')).envelope.value
   assert.equal(status.signedInHost, 'github.com')
   const before = h.requests.length
@@ -606,9 +609,9 @@ test('logout aborts an in-flight device poll response body without persisting or
   assert.equal(h.records.has(BRIDGE_RECORD_KEY), false)
 })
 
-test('completed device sign-in clears hidden config, discovers the live catalog and notifies the bridge picker', async t => {
+test('completed device sign-in clears hidden and pinned config, discovers the live catalog and notifies the bridge picker', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const h = host(t, { signedOut: true, hidden: ['mai-code-2'] })
+  const h = host(t, { signedOut: true, hidden: ['mai-code-2'], pinned: ['mai-code-2'] })
   assert.deepEqual(await h.picker(), [])
   assert.equal((await h.request('login', {})).envelope.value.state, 'pending')
   const before = h.updates.length
@@ -617,6 +620,8 @@ test('completed device sign-in clears hidden config, discovers the live catalog 
   assert.equal((await h.request('status')).envelope.value.state, 'authenticated')
   assert.deepEqual(await h.picker(), supported)
   assert.deepEqual(h.hiddenModels.get(), [])
+  assert.deepEqual(h.pinnedModels.get(), [])
+  assert.deepEqual((await h.request('status')).envelope.value.pinnedModels, [])
   assert.deepEqual(h.credentialWrites, [BRIDGE_RECORD_KEY])
   assert.ok(h.updates.length > before)
   assert.ok(h.updates.every(provider => provider === BRIDGE_PROVIDER))

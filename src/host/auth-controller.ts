@@ -118,6 +118,7 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
     }
   }
   const resetHiddenModels = () => bestEffort('Could not reset hidden models', () => deps.config.writeHidden(undefined))
+  const resetPinnedModels = () => bestEffort('Could not reset pinned models', () => deps.config.writePinned(undefined))
 
   const status = async (): Promise<AuthStatus> => {
     const account = await readAccount()
@@ -175,6 +176,7 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
             return
           }
           await resetHiddenModels()
+          await resetPinnedModels()
           if (current !== generation) return
           finish('authenticated')
           deps.logger.info(`GitHub Copilot sign-in at ${device.domain} completed`)
@@ -214,6 +216,7 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
     cancelLogin()
     await deleteBridgeAccount(credentials)
     await resetHiddenModels()
+    await resetPinnedModels()
     await bestEffort('Sign-out follow-up failed', () => deps.onSignedOut?.())
     return status()
   }

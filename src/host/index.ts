@@ -164,6 +164,7 @@ export function apply(ctx: Context, config: Config): void {
       auth.cancelLogin()
       reset()
       void configStore.writeHidden(undefined).catch(error => ctx.logger.warn(`${name}: could not reset hidden models: ${errorMessage(error)}`))
+      void configStore.writePinned(undefined).catch(error => ctx.logger.warn(`${name}: could not reset pinned models: ${errorMessage(error)}`))
       void discover()
     } else if (paths.some(path => path[0] === 'hiddenModels' || path[0] === 'pinnedModels')) notify()
   })
