@@ -165,7 +165,7 @@ export function apply(ctx: Context, config: Config): void {
       reset()
       void configStore.writeHidden(undefined).catch(error => ctx.logger.warn(`${name}: could not reset hidden models: ${errorMessage(error)}`))
       void discover()
-    } else if (paths.some(path => path[0] === 'hiddenModels')) notify()
+    } else if (paths.some(path => path[0] === 'hiddenModels' || path[0] === 'pinnedModels')) notify()
   })
   ctx.inject(['credentials'], credentialsCtx => {
     void discover()
@@ -185,7 +185,7 @@ export function apply(ctx: Context, config: Config): void {
         if (started !== epoch || disposed) throw new Error('Copilot account changed')
         return snapshot
       } },
-      tokens, hidden: () => configStore.readHidden(),
+      tokens, hidden: () => configStore.readHidden(), pinned: () => configStore.readPinned(),
       get loadImage() {
         const attachments = llmCtx.get('attachments')
         if (attachments === undefined) return undefined

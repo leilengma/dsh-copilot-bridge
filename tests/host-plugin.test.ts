@@ -228,6 +228,30 @@ test('pin route persists exact supported ids, deduplicates, rejects invalid inpu
   assert.deepEqual(h.settingWrites.at(-1), [{ op: 'unset', path: ['pinnedModels'] }])
 })
 
+test('pins stably lead bridge picker and management rows without revealing hidden pins or changing resolution or native models', async t => {
+  const h = host(t, { hidden: ['mai-code-2'] })
+  await h.picker()
+  const savedModel = await h.runtime.resolveModelInfo(BRIDGE_PROVIDER, 'mai-code-2')
+  const before = h.updates.length
+  await h.request('pinned-models', { pinnedModels: ['kimi-k3', 'mai-code-2', 'gpt-6'] })
+  assert.deepEqual(await h.picker(), ['gpt-6', 'kimi-k3', 'claude-sonnet-5', 'grok-4.7', 'mai-code-2-flash', 'gemini-3-pro'])
+  const view = (await h.request('models')).envelope.value
+  assert.deepEqual(ids(view.models), ['gpt-6', 'mai-code-2', 'kimi-k3', 'claude-sonnet-5', 'claude-opus-5', 'gpt-5.4-nano', 'grok-4.7', 'mai-code-2-flash', 'gemini-3-pro', 'future-realtime'])
+  assert.deepEqual(view.status.hiddenModels, ['mai-code-2'])
+  assert.deepEqual(view.status.pinnedModels, ['kimi-k3', 'mai-code-2', 'gpt-6'])
+  assert.deepEqual(await h.runtime.resolveModelInfo(BRIDGE_PROVIDER, 'mai-code-2'), savedModel)
+  assert.ok(h.updates.length > before)
+  assert.ok(h.updates.every(provider => provider === BRIDGE_PROVIDER))
+  assert.deepEqual(ids(await h.runtime.listModels('github-copilot')), ['mai-code-2'])
+  assert.deepEqual(h.records.get('llm-pi-ai/github-copilot'), { kind: 'api-key', key: 'native-user-owned' })
+  assert.deepEqual(h.credentialWrites, [])
+  assert.equal(Object.hasOwn(h.runtime, 'listModels'), false)
+  await h.request('hidden-models', { hiddenModels: [] })
+  assert.deepEqual(await h.picker(), ['gpt-6', 'mai-code-2', 'kimi-k3', 'claude-sonnet-5', 'grok-4.7', 'mai-code-2-flash', 'gemini-3-pro'])
+  await h.request('pinned-models', { pinnedModels: [] })
+  assert.deepEqual(await h.picker(), supported)
+})
+
 test('a failed initial discovery does not turn picker notifications into a retry loop; manual refresh recovers', async t => {
   const h = host(t)
   const gate = deferred<Response>()

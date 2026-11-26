@@ -1,6 +1,7 @@
 import type { CopilotMetadata } from './copilot-metadata.ts'
 import type { LiveCatalog } from './live-catalog.ts'
 import type { AuthStatus, CopilotModel, ModelCatalog } from '../shared/contract.ts'
+import { pinnedFirst } from './pinned-models.ts'
 
 /** Management rows come from the same snapshot as the picker, including disabled and hidden models. */
 export async function modelCatalog(
@@ -18,5 +19,5 @@ export async function modelCatalog(
       inputModalities: model.input.filter(input => input !== 'image' || vision),
     })) : []
   const state = status.authenticated ? catalog?.state() ?? { status: 'loading' as const } : { status: 'ready' as const }
-  return { status, models, state: state.status, ...state.status === 'error' ? { error: state.error } : {} }
+  return { status, models: pinnedFirst(models, status.pinnedModels ?? []), state: state.status, ...state.status === 'error' ? { error: state.error } : {} }
 }

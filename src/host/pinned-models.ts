@@ -8,3 +8,9 @@ export function validatePinnedModels(input: unknown): string[] {
   }
   return [...new Set(input)]
 }
+
+/** Stable partition: pin preference never replaces the live catalog's relative order. */
+export function pinnedFirst<T extends { readonly id: string }>(models: readonly T[], pinnedIds: readonly string[]): T[] {
+  const pinned = new Set(pinnedIds)
+  return [...models.filter(model => pinned.has(model.id)), ...models.filter(model => !pinned.has(model.id))]
+}

@@ -23,6 +23,7 @@ import { streamSimple as openaiCompletions } from '@earendil-works/pi-ai/api/ope
 import { streamSimple as openaiResponses } from '@earendil-works/pi-ai/api/openai-responses'
 import { AccessTokenError, type AccessToken, type AccessTokens } from './access-token.ts'
 import type { CatalogProtocol, LiveCatalog, SupportedCatalogModel } from './live-catalog.ts'
+import { pinnedFirst } from './pinned-models.ts'
 
 export const BRIDGE_PROVIDER = 'copilot-bridge'
 export const BRIDGE_PROVIDER_NAME = 'GitHub Copilot Bridge'
@@ -39,6 +40,8 @@ export interface BridgeAdapterDeps {
   readonly tokens: Pick<AccessTokens, 'current' | 'invalidate'>
   /** Exact, case-sensitive hidden model IDs (advisory: hidden models still resolve). */
   readonly hidden: () => readonly string[]
+  /** Stable pinned-first list order only; pinning does not affect visibility or resolution. */
+  readonly pinned?: () => readonly string[]
   readonly transports?: Partial<Record<CatalogProtocol, BridgeTransport>>
   /** Passed to pi-ai for every provider request. */
   readonly fetch?: typeof globalThis.fetch
@@ -352,7 +355,8 @@ export class BridgeAdapter extends LlmAdapter {
       return []
     }
     const hidden = new Set(this.deps.hidden())
-    return snapshot.models.flatMap(model => model.supported && !hidden.has(model.id) ? [modelInfo(model, this.deps.loadImage !== undefined)] : [])
+    return pinnedFirst(snapshot.models, this.deps.pinned?.() ?? [])
+      .flatMap(model => model.supported && !hidden.has(model.id) ? [modelInfo(model, this.deps.loadImage !== undefined)] : [])
   }
 
   override async resolveModel(_provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
