@@ -34,6 +34,20 @@ test('missing LLM service degrades to raw account ids and unknown catalogs stay 
   assert.deepEqual((await modelCatalog({ ...status, availableModels: [] })).models, [])
 })
 
+test('live billing enriches only eligible account ids, including hidden rows, without changing visibility', async () => {
+  const retiring = { retiring: 'Retiring December 1', pricing: { input: 5, output: 25 }, promotion: { discountPercent: 50 } }
+  const result = await modelCatalog(status, undefined, async () => new Map([
+    ['hidden', retiring], ['not-eligible', retiring],
+  ]))
+  assert.equal(result.status, status)
+  assert.deepEqual(result.models, [
+    { id: 'hidden', name: 'hidden', ...retiring }, { id: 'unknown', name: 'unknown' }, { id: 'visible', name: 'visible' },
+  ])
+  assert.deepEqual((await modelCatalog({ ...status, authenticated: false }, undefined, async () => {
+    assert.fail('signed out must not request metadata')
+  })).models, [])
+})
+
 test('signed-out callers never resolve or expose model metadata', async () => {
   const result = await modelCatalog({ ...status, authenticated: false }, {
     async resolveModelInfo() { throw new Error('must not be called') },

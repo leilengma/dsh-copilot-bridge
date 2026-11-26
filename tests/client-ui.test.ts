@@ -72,7 +72,38 @@ test('model table exposes accessible eye toggles, search and real metadata witho
   assert.match(html, /200K/)
   assert.match(html, /1M/)
   assert.match(html, />Vision</)
-  assert.doesNotMatch(html, />Tools<|Credits|\$|Add models|Install model providers/)
+  assert.doesNotMatch(html, />Tools<|\$|Add models|Install model providers/)
+})
+
+test('model table shows provider credit prices, discount and Retiring text without disabling visibility', () => {
+  const html = ui.renderTable({ ...props, models: [{
+    id: 'm', name: 'Model', pricing: { input: 5, output: 25, cacheRead: 0, cacheWrite: 6.25 },
+    longContextPricing: { input: 10, output: 50 }, defaultContextMax: 200_000,
+    promotion: { discountPercent: 50, message: 'Special <offer>', endsAt: '2099-12-01T00:00:00Z' },
+    retiring: 'Use <replacement> soon',
+  }] })
+  assert.match(html, /Credits per 1M tokens/)
+  assert.match(html, /In: 5/)
+  assert.match(html, /Out: 25/)
+  assert.match(html, /Cache Read: 0/)
+  assert.match(html, /Cache Write: 6.25/)
+  assert.match(html, /50% off/)
+  assert.match(html, /2099-12-01/)
+  assert.match(html, /<summary[^>]*>Retiring<\/summary>/)
+  assert.match(html, /<summary[^>]*>50% off<\/summary>/)
+  assert.match(html, /Use &lt;replacement&gt; soon/)
+  assert.match(html, /Special &lt;offer&gt;/)
+  assert.match(html, /200K/)
+  assert.match(html, /In: 10/)
+  assert.doesNotMatch(html, /disabled=|Retired|<replacement>|<offer>/)
+})
+
+test('a stale response cannot display an already-expired discount', () => {
+  const html = ui.renderTable({ ...props, models: [{ id: 'm', name: 'Model',
+    promotion: { discountPercent: 50, endsAt: '2000-01-01T00:00:00Z' }, retiring: 'Still retiring',
+  }] })
+  assert.doesNotMatch(html, /50% off/)
+  assert.match(html, /Retiring/)
 })
 
 test('account discovery notifies model-page subscribers but unrelated records do not', () => {

@@ -21,6 +21,7 @@ import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { PI_AI_PROVIDER, PI_AI_RECORD_KEY, type AuthStatus } from '../shared/contract.ts'
 import { createAuthController, type AuthController, type BridgeConfig } from './auth-controller.ts'
 import { pollDeviceFlow, startDeviceFlow } from './device-flow.ts'
+import { createCopilotMetadata } from './copilot-metadata.ts'
 import { authRoutes } from './routes.ts'
 import { filterModelSelection } from './model-selection.ts'
 
@@ -76,12 +77,13 @@ function bridgeConfig(ctx: Context, config: Config): BridgeConfig {
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
 function registerRoutes(ctx: Context, auth: AuthController): void {
+  const metadata = createCopilotMetadata({ credentials: () => ctx.get('credentials') })
   // `connection.fetch` routes run only after the shared `/api` channel applied its
   // trust and authentication policy; `webServer.register` would be unauthenticated.
   ctx.inject(['connection'], connectionCtx => {
     connectionCtx.effect(() => {
       const { fetch } = connectionCtx.connection
-      const disposers = authRoutes(auth, () => ctx.get('llm')).map(route => fetch.register(route))
+      const disposers = authRoutes(auth, () => ctx.get('llm'), metadata).map(route => fetch.register(route))
       return async () => {
         for (const dispose of disposers.reverse()) await dispose()
       }

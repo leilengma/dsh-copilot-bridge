@@ -49,12 +49,32 @@ export interface AuthStatus {
   readonly hiddenModels?: readonly string[]
 }
 
+/** Provider-reported AI credits per 1M tokens; absent fields are unknown (not zero). */
+export interface ModelPrices {
+  readonly input?: number
+  readonly output?: number
+  readonly cacheRead?: number
+  readonly cacheWrite?: number
+}
+
+export interface ModelPromotion {
+  readonly discountPercent: number
+  readonly message?: string
+  readonly endsAt?: string
+}
+
 /** Display-only metadata; missing values are unknown, never inferred capabilities or prices. */
 export interface CopilotModel {
   readonly id: string
   readonly name: string
   readonly contextWindow?: number
   readonly inputModalities?: readonly ('text' | 'image' | 'audio' | 'video')[]
+  readonly pricing?: ModelPrices
+  readonly longContextPricing?: ModelPrices
+  readonly defaultContextMax?: number
+  readonly promotion?: ModelPromotion
+  /** Provider warning text; the badge always says Retiring, never Retired. */
+  readonly retiring?: string
 }
 
 /** Full account catalog for management, including models excluded from the picker. */

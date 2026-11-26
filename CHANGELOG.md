@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Enrich the Plugins model table with live Copilot credit prices (including long-context tiers), active discount badges and informational **Retiring** warnings. Read metadata host-side using the route-owned access token, with bounded caching, proxy support and fail-open missing data; model eligibility and visibility are unchanged.
+
 - Move model visibility from Settings into **Plugins → GitHub Copilot**: searchable model table with immediate-save eye toggles, context size and available input capabilities. Preserve hidden rows for restoration and show unavailable costs/metadata as **—**. Settings retains authentication and Enterprise host configuration.
 
 - Fix hidden Copilot models remaining visible in Harness 0.2.2-rc.5's static picker catalog: filter the advertised LLM listing as well as the grant, invalidate cached selectors on changes, and restore the service method on bridge unload. Add a regression check using the installed Harness adapter and LLM service.

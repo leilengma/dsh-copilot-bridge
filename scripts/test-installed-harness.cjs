@@ -13,6 +13,17 @@ const bridge = require('../lib/index.js')
 const settle = () => new Promise(resolve => setImmediate(resolve))
 
 async function main() {
+  const originalFetch = globalThis.fetch
+  let metadataRequests = 0
+  globalThis.fetch = async (url, init) => {
+    assert.equal(url, 'https://api.individual.githubcopilot.com/models', 'unexpected network request')
+    assert.equal(init.redirect, 'error')
+    metadataRequests++
+    return Response.json({ data: [{ id: 'claude-haiku-4.5',
+      billing: { token_prices: { batch_size: 1_000_000, default: { input_price: 5, output_price: 25, cache_read_price: 0 } }, promo: { discount_percent: 50 } },
+      warning_text: { model_pending_deprecation: 'Provider retirement warning' },
+    }] })
+  }
   const ctx = new Context()
   new LlmRuntime(ctx)
   piAi.apply(ctx, piAi.Config({ providers: { 'github-copilot': {} } }))
@@ -55,12 +66,17 @@ async function main() {
     assert.notEqual(row.name, row.id, 'resolve actual display metadata from the installed pi-ai adapter')
     assert.ok(row.contextWindow > 0)
     assert.ok(row.inputModalities.includes('image'))
+    assert.deepEqual(row.pricing, { input: 5, output: 25, cacheRead: 0 })
+    assert.equal(row.promotion.discountPercent, 50)
+    assert.equal(row.retiring, 'Provider retirement warning')
+    assert.equal(metadataRequests, 1, 'metadata enriches management, not picker visibility')
     assert.ok(!JSON.stringify(catalog).includes('fixture-only'), 'never expose grant secrets')
     console.log(JSON.stringify({ baseline: baseline.length, filtered: models.length, hiddenOmitted: true, management: catalog.models.length, hiddenMetadata: { name: row.name, contextWindow: row.contextWindow } }))
     await fiber.dispose()
     assert.equal((await consumer.listModels('github-copilot')).length, baseline.length, 'unload must restore the catalog')
     console.log('PASS: installed pi-ai adapter + LLM service + bridge; catalog restored on unload')
   } finally {
+    globalThis.fetch = originalFetch
     await fiber.dispose()
     await ctx.fiber.dispose()
   }

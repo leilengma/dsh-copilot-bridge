@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { AuthStatus, CopilotModel } from '../shared/contract.ts'
+import type { AuthStatus, CopilotModel, ModelPrices } from '../shared/contract.ts'
 import { text, useLocaleRevision } from './i18n.ts'
+import { promotionActive, watchPromotionExpiry } from './promotion-expiry.ts'
 import { modelCss as css } from './model-styles.ts'
 
 function Eye({ visible }: { readonly visible: boolean }) {
@@ -18,6 +19,23 @@ const contextSize = (tokens: number | undefined): string => tokens === undefined
   : tokens >= 1_000_000 ? `${Number((tokens / 1_000_000).toFixed(2))}M`
     : tokens >= 1_000 ? `${Number((tokens / 1_000).toFixed(1))}K` : String(tokens)
 
+function PriceLine({ prices }: { readonly prices: ModelPrices }) {
+  const amount = (value: number | undefined) => value === undefined ? '—' : new Intl.NumberFormat(undefined, { maximumSignificantDigits: 10 }).format(value)
+  return <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 16px', fontVariantNumeric: 'tabular-nums' }}>
+    <span>{text('priceInput', { amount: amount(prices.input) })}</span>
+    <span>{text('priceOutput', { amount: amount(prices.output) })}</span>
+    <span>{text('priceCacheRead', { amount: amount(prices.cacheRead) })}</span>
+    <span>{text('priceCacheWrite', { amount: amount(prices.cacheWrite) })}</span>
+  </div>
+}
+
+function MetadataBadge({ label, details }: { readonly label: string; readonly details: string }) {
+  return <details style={{ maxWidth: '100%' }}>
+    <summary style={{ ...css.badge, cursor: 'pointer' }} title={details}>{label}</summary>
+    <div style={{ ...css.modelId, whiteSpace: 'pre-line', maxWidth: 360 }}>{details}</div>
+  </details>
+}
+
 /** All account models stay in this table, including hidden rows, so toggling is reversible. */
 export function ModelsTable({ status, models, busy, onSave }: {
   readonly status: AuthStatus
@@ -27,6 +45,8 @@ export function ModelsTable({ status, models, busy, onSave }: {
 }) {
   useLocaleRevision()
   const [filter, setFilter] = useState('')
+  const [, refreshPromotion] = useState(0)
+  useEffect(() => watchPromotionExpiry(models, () => refreshPromotion(value => value + 1)), [models])
   const hidden = status.hiddenModels ?? []
   const query = filter.trim().toLowerCase()
   const shown = models.filter(model => `${model.name}\n${model.id}`.toLowerCase().includes(query))
@@ -62,7 +82,14 @@ export function ModelsTable({ status, models, busy, onSave }: {
                   </Button>
                 </td>
                 <td style={css.cell}>
-                  <div style={{ ...css.modelName, color: visible ? undefined : 'var(--dsw-alias-label-tertiary)' }}>{model.name}</div>
+                  <div style={{ ...css.badges, alignItems: 'center' }}>
+                    <span style={{ ...css.modelName, color: visible ? undefined : 'var(--dsw-alias-label-tertiary)' }}>{model.name}</span>
+                    {model.retiring ? <MetadataBadge label={text('retiring')} details={model.retiring} /> : null}
+                    {model.promotion && promotionActive(model.promotion) ? <MetadataBadge label={text('modelDiscount', { percent: model.promotion.discountPercent })} details={[
+                      model.promotion.message,
+                      model.promotion.endsAt ? text('promotionEnds', { date: model.promotion.endsAt }) : undefined,
+                    ].filter(Boolean).join('\n') || text('defaultPricing')} /> : null}
+                  </div>
                   {model.name !== model.id ? <div style={css.modelId}>{model.id}</div> : null}
                 </td>
                 <td style={{ ...css.cell, ...css.numeric }}>{contextSize(model.contextWindow)}</td>
@@ -75,7 +102,13 @@ export function ModelsTable({ status, models, busy, onSave }: {
                     {!model.inputModalities?.length ? '—' : null}
                   </div>
                 </td>
-                <td style={css.cell} title={text('modelMetadataNote')}>—</td>
+                <td style={{ ...css.cell, minWidth: 280 }}>
+                  {model.pricing ? <div title={text('defaultPricing')}><PriceLine prices={model.pricing} /></div> : <span title={text('modelMetadataNote')}>—</span>}
+                  {model.longContextPricing ? <details style={{ marginTop: 6, fontSize: 12 }}>
+                    <summary style={{ cursor: 'pointer' }}>{model.defaultContextMax === undefined ? text('longContextPricing') : text('aboveContextPricing', { context: contextSize(model.defaultContextMax) })}</summary>
+                    <PriceLine prices={model.longContextPricing} />
+                  </details> : null}
+                </td>
               </tr>
             })}
             {shown.length === 0 ? <tr><td colSpan={5} style={css.empty}>{text(models.length === 0 ? 'noAvailableModels' : 'noMatchingModels')}</td></tr> : null}
