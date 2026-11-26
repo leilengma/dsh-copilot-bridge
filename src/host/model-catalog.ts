@@ -1,28 +1,22 @@
 import type { CopilotMetadata } from './copilot-metadata.ts'
-import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
-import { PI_AI_PROVIDER, type AuthStatus, type CopilotModel, type ModelCatalog } from '../shared/contract.ts'
+import type { LiveCatalog } from './live-catalog.ts'
+import type { AuthStatus, CopilotModel, ModelCatalog } from '../shared/contract.ts'
 
-/** Resolve display metadata by exact id, never from the visibility-filtered picker list. */
+/** Management rows come from the same snapshot as the picker, including disabled and hidden models. */
 export async function modelCatalog(
-  status: AuthStatus, runtime?: Pick<LlmRuntime, 'resolveModelInfo'>,
+  status: AuthStatus, catalog?: Pick<LiveCatalog, 'snapshot' | 'state'>,
   metadata?: () => Promise<ReadonlyMap<string, CopilotMetadata>>,
 ): Promise<ModelCatalog> {
-  const live = status.authenticated && status.availableModels?.length ? await metadata?.() : undefined
-  const models = await Promise.all((status.authenticated ? status.availableModels ?? [] : []).map(async (id): Promise<CopilotModel> => {
-    if (runtime !== undefined) {
-      try {
-        const info = await runtime.resolveModelInfo(PI_AI_PROVIDER, id)
-        return {
-          ...live?.get(id), id, name: info.name,
-          ...info.context === undefined ? {} : { contextWindow: info.context.contextWindow },
-          ...info.inputModalities === undefined ? {} : { inputModalities: info.inputModalities },
-        }
-      } catch {
-        // Account discovery can precede the adapter's catalog, or LLM may be unavailable.
-        // Keep the row restorable even when its optional display metadata is unknown.
-      }
-    }
-    return { ...live?.get(id), id, name: id }
-  }))
-  return { status, models, state: 'ready' }
+  const snapshot = catalog?.snapshot()
+  const display = status.authenticated && snapshot?.models.length ? await metadata?.() : undefined
+  const models: CopilotModel[] = status.authenticated && snapshot === catalog?.snapshot()
+    ? (snapshot?.models ?? []).map(model => ({
+      ...display?.get(model.id), id: model.id, name: model.name,
+      ...model.protocol === undefined ? {} : { protocol: model.protocol },
+      ...model.disabledReason === undefined ? {} : { disabledReason: model.disabledReason },
+      ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
+      inputModalities: model.input,
+    })) : []
+  const state = status.authenticated ? catalog?.state() ?? { status: 'loading' as const } : { status: 'ready' as const }
+  return { status, models, state: state.status, ...state.status === 'error' ? { error: state.error } : {} }
 }

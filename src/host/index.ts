@@ -17,14 +17,17 @@ import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
-import { BRIDGE_RECORD_KEY, PI_AI_PROVIDER } from '../shared/contract.ts'
+import { BRIDGE_PROVIDER, BRIDGE_RECORD_KEY } from '../shared/contract.ts'
 import { createAuthController, type AuthController, type BridgeConfig } from './auth-controller.ts'
 import { pollDeviceFlow, startDeviceFlow } from './device-flow.ts'
 import { createCopilotUsage } from './copilot-usage.ts'
 import { createCopilotMetadata } from './copilot-metadata.ts'
 import { authRoutes } from './routes.ts'
-import { filterModelSelection } from './model-selection.ts'
 import { readBridgeAccount } from './bridge-credentials.ts'
+import { createAccessTokens } from './access-token.ts'
+import { createLiveCatalog, type LiveCatalog } from './live-catalog.ts'
+import { BridgeAdapter } from './bridge-adapter.ts'
+import { normalizeEnterpriseDomain } from './enterprise.ts'
 
 export const name = 'copilot-bridge'
 
@@ -77,15 +80,15 @@ function bridgeConfig(ctx: Context, config: Config): BridgeConfig {
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
-function registerRoutes(ctx: Context, auth: AuthController): void {
-  const metadata = createCopilotMetadata({ credentials: () => ctx.get('credentials') })
+function registerRoutes(ctx: Context, auth: AuthController, catalog: LiveCatalog, accessToken: ReturnType<typeof createAccessTokens>['current']): void {
+  const metadata = createCopilotMetadata({ credentials: () => ctx.get('credentials'), accessToken })
   const usage = createCopilotUsage({ credentials: () => ctx.get('credentials') })
   // `connection.fetch` routes run only after the shared `/api` channel applied its
   // trust and authentication policy; `webServer.register` would be unauthenticated.
   ctx.inject(['connection'], connectionCtx => {
     connectionCtx.effect(() => {
       const { fetch } = connectionCtx.connection
-      const disposers = authRoutes(auth, () => ctx.get('llm'), metadata, usage).map(route => fetch.register(route))
+      const disposers = authRoutes(auth, catalog, metadata, usage).map(route => fetch.register(route))
       return async () => {
         for (const dispose of disposers.reverse()) await dispose()
       }
@@ -94,11 +97,32 @@ function registerRoutes(ctx: Context, auth: AuthController): void {
 }
 
 export function apply(ctx: Context, config: Config): void {
-  let providerModelIds: (() => Promise<readonly string[]>) | undefined
+  const configStore = bridgeConfig(ctx, config)
+  const notify = () => ctx.emit('llm/models-updated', BRIDGE_PROVIDER)
+  const readAccount = async () => {
+    const account = await readBridgeAccount(ctx.get('credentials'))
+    return account?.enterpriseHost === normalizeEnterpriseDomain(configStore.read()) ? account : undefined
+  }
+  const tokens = createAccessTokens({ readAccount, logger: ctx.logger })
+  const catalog = createLiveCatalog({ token: () => tokens.current(), logger: ctx.logger })
+  let disposed = false
+  let epoch = 0
+  const reset = () => {
+    epoch++
+    tokens.reset()
+    catalog.reset()
+    notify()
+  }
+  const discover = async () => {
+    const started = epoch
+    if (!disposed && await readAccount() && started === epoch) await catalog.refresh().catch(() => {})
+  }
   const auth = createAuthController({
     credentials: () => ctx.get('credentials'),
-    config: bridgeConfig(ctx, config),
-    catalogIds: async () => providerModelIds?.(),
+    config: configStore,
+    catalogIds: async () => catalog.snapshot()?.models.flatMap(model => model.supported ? [model.id] : []),
+    onSignedIn: discover,
+    onSignedOut: reset,
     startDeviceFlow,
     pollDeviceFlow,
     logger: {
@@ -108,41 +132,41 @@ export function apply(ctx: Context, config: Config): void {
     },
   })
   ctx.effect(() => () => auth.dispose(), `${name}: stop device-flow polling`)
+  ctx.effect(() => catalog.onChange(notify), `${name}: catalog updates`)
+  ctx.effect(() => tokens.onRefresh(() => { void discover() }), `${name}: token refresh discovery`)
+  ctx.effect(() => () => {
+    disposed = true
+    epoch++
+    tokens.dispose()
+    catalog.dispose()
+  }, `${name}: dispose live catalog and access tokens`)
+  ctx.on('credentials/record-updated', key => {
+    if (key !== BRIDGE_RECORD_KEY) return
+    reset()
+    void discover()
+  })
+  ctx.on('loader/volatile-update', paths => {
+    if (paths.some(path => path[0] === 'enterpriseUrl')) {
+      reset()
+      void configStore.writeHidden(undefined).catch(error => ctx.logger.warn(`${name}: could not reset hidden models: ${errorMessage(error)}`))
+      void discover()
+    } else if (paths.some(path => path[0] === 'hiddenModels')) notify()
+  })
+  ctx.inject(['credentials'], credentialsCtx => {
+    void discover()
+    credentialsCtx.effect(() => () => reset(), `${name}: credentials lifetime`)
+  })
   ctx.inject(['llm'], llmCtx => {
-    const notify = () => {
-      void llmCtx.parallel('llm/models-updated', PI_AI_PROVIDER)
-        .catch(error => ctx.logger.warn(`${name}: model selection refresh failed: ${errorMessage(error)}`))
-    }
-    llmCtx.effect(() => {
-      // A fresh grant has no account model ids. Keep a full provider catalog
-      // reader for management; going through our picker filter loses hidden rows.
-      const runtime = llmCtx.llm
-      const original = runtime.listModels
-      const fullCatalog = async () => (await original.call(runtime, PI_AI_PROVIDER)).map(model => model.id)
-      providerModelIds = fullCatalog
-      const dispose = filterModelSelection(runtime, () => config.hiddenModels.get() ?? [],
-        async () => await readBridgeAccount(llmCtx.get('credentials')) !== undefined)
-      return () => {
-        if (providerModelIds === fullCatalog) providerModelIds = undefined
-        dispose()
-        notify()
-      }
-    }, `${name}: model selection filter`)
-    notify()
-    // Loader targets only the entry fiber, not this injected child's fiber.
-    // Register on the entry context but clean up when the LLM service unloads.
-    llmCtx.effect(() => ctx.on('loader/volatile-update', paths => {
-      if (paths.some(path => path[0] === 'hiddenModels')) notify()
-    }), `${name}: model selection config updates`)
-    // The adapter's static catalog does not change on logout. Explicitly
-    // invalidate cached pickers when the grant changes, even with no hidden ids.
-    llmCtx.effect(() => ctx.on('credentials/record-updated', key => {
-      if (key === BRIDGE_RECORD_KEY) notify()
-    }), `${name}: model selection credential updates`)
-    llmCtx.inject(['credentials'], credentialsCtx => {
-      notify()
-      credentialsCtx.effect(() => () => notify(), `${name}: model selection credentials lifetime`)
+    const adapter = new BridgeAdapter({
+      catalog: { async ready() {
+        const started = epoch
+        const account = await readAccount()
+        if (started !== epoch || disposed) throw new Error('Copilot account changed')
+        return account === undefined ? { generation: -1, models: [] } : catalog.ready()
+      } },
+      tokens, hidden: () => configStore.readHidden(),
     })
+    llmCtx.llm.registerAdapter([BRIDGE_PROVIDER], adapter)
   })
 
   // This plugin ships its own Settings page; hide the generated form.
@@ -150,5 +174,5 @@ export function apply(ctx: Context, config: Config): void {
     settingsCtx.effect(() => settingsCtx.settings.configure({ auto: false }, ctx.fiber), `${name}: custom settings page`)
   })
 
-  registerRoutes(ctx, auth)
+  registerRoutes(ctx, auth, catalog, signal => tokens.current(signal))
 }

@@ -2,55 +2,45 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { AuthStatus } from '../src/shared/contract.ts'
 import { modelCatalog } from '../src/host/model-catalog.ts'
+import { projectCatalog, type CatalogSnapshot } from '../src/host/live-catalog.ts'
+import { modelsPayload } from './fixtures/copilot-models.ts'
 
 const status: AuthStatus = {
   authenticated: true, state: 'authenticated', provider: 'copilot-bridge',
-  githubHost: 'github.com', enterpriseUrl: '', configWritable: true,
-  availableModels: ['hidden', 'unknown', 'visible'], hiddenModels: ['hidden'],
+  githubHost: 'github.com', enterpriseUrl: '', configWritable: true, hiddenModels: ['mai-code-2'],
 }
+const snapshot: CatalogSnapshot = { generation: 1, models: projectCatalog(modelsPayload) }
+const catalog = { snapshot: () => snapshot, state: () => ({ status: 'ready' as const }) }
 
-test('management catalog includes hidden models and resolves safe metadata without listing the filtered picker', async () => {
-  const calls: string[] = []
-  const result = await modelCatalog(status, {
-    async resolveModelInfo(provider, id) {
-      calls.push(`${provider}/${id}`)
-      if (id === 'unknown') throw new Error('model missing from adapter')
-      return { provider, id, name: `Name ${id}`, context: { contextWindow: 200_000 }, inputModalities: ['text', 'image'] }
-    },
-  })
-  assert.equal(result.status, status)
-  assert.deepEqual(result.models, [
-    { id: 'hidden', name: 'Name hidden', contextWindow: 200_000, inputModalities: ['text', 'image'] },
-    { id: 'unknown', name: 'unknown' },
-    { id: 'visible', name: 'Name visible', contextWindow: 200_000, inputModalities: ['text', 'image'] },
-  ])
-  assert.deepEqual(calls, ['github-copilot/hidden', 'github-copilot/unknown', 'github-copilot/visible'])
-})
-
-test('missing LLM service degrades to raw account ids and unknown catalogs stay empty', async () => {
-  assert.deepEqual((await modelCatalog(status)).models, status.availableModels?.map(id => ({ id, name: id })))
-  const { availableModels: _models, ...unknown } = status
-  assert.deepEqual((await modelCatalog(unknown)).models, [])
-  assert.deepEqual((await modelCatalog({ ...status, availableModels: [] })).models, [])
-})
-
-test('live billing enriches only eligible account ids, including hidden rows, without changing visibility', async () => {
+test('management rows preserve hidden and disabled descriptors and merge only exact-id display metadata', async () => {
   const retiring = { retiring: 'Retiring December 1', pricing: { input: 5, output: 25 }, promotion: { discountPercent: 50 } }
-  const result = await modelCatalog(status, undefined, async () => new Map([
-    ['hidden', retiring], ['not-eligible', retiring],
-  ]))
+  const result = await modelCatalog(status, catalog, async () => new Map([['mai-code-2', retiring], ['not-eligible', retiring]]))
   assert.equal(result.status, status)
-  assert.deepEqual(result.models, [
-    { id: 'hidden', name: 'hidden', ...retiring }, { id: 'unknown', name: 'unknown' }, { id: 'visible', name: 'visible' },
-  ])
-  assert.deepEqual((await modelCatalog({ ...status, authenticated: false }, undefined, async () => {
+  assert.equal(result.models.length, 10)
+  assert.deepEqual(result.models.find(model => model.id === 'mai-code-2'), {
+    id: 'mai-code-2', name: 'Name mai-code-2', protocol: 'openai-responses', contextWindow: 200_000, inputModalities: ['text'], ...retiring,
+  })
+  assert.equal(result.models.find(model => model.id === 'claude-opus-5')?.disabledReason, 'not-offered')
+  assert.equal(result.models.find(model => model.id === 'future-realtime')?.disabledReason, 'unsupported-protocol')
+})
+
+test('unknown differs from known-empty, and failure keeps the last good rows with a safe error', async () => {
+  assert.deepEqual(await modelCatalog(status), { status, models: [], state: 'loading' })
+  assert.deepEqual(await modelCatalog(status, { ...catalog, snapshot: () => ({ generation: 1, models: [] }) }), { status, models: [], state: 'ready' })
+  const failed = await modelCatalog(status, { ...catalog, state: () => ({ status: 'error', error: 'Copilot model discovery failed' }) })
+  assert.equal(failed.models.length, 10)
+  assert.equal(failed.state, 'error')
+  assert.equal(failed.error, 'Copilot model discovery failed')
+})
+
+test('signed-out callers never load metadata and reset during enrichment discards stale rows', async () => {
+  assert.deepEqual((await modelCatalog({ ...status, authenticated: false }, catalog, async () => {
     assert.fail('signed out must not request metadata')
   })).models, [])
-})
-
-test('signed-out callers never resolve or expose model metadata', async () => {
-  const result = await modelCatalog({ ...status, authenticated: false }, {
-    async resolveModelInfo() { throw new Error('must not be called') },
+  let current: CatalogSnapshot | undefined = snapshot
+  const result = await modelCatalog(status, { ...catalog, snapshot: () => current }, async () => {
+    current = undefined
+    return new Map()
   })
   assert.deepEqual(result.models, [])
 })
