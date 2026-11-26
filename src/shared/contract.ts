@@ -50,6 +50,8 @@ export interface AuthStatus {
   readonly availableModels?: readonly string[]
   /** Saved hidden ids, after pruning; only present when authenticated. */
   readonly hiddenModels?: readonly string[]
+  /** Saved exact model ids pinned to the top of the bridge catalog; only present when authenticated. */
+  readonly pinnedModels?: readonly string[]
 }
 
 /** Provider-reported AI credits per 1M tokens; absent fields are unknown (not zero). */
@@ -116,6 +118,11 @@ export type CopilotUsage = { readonly state: 'signed-out' | 'unavailable' } | {
 /** Body of `POST /hidden-models`. An empty array removes the config key. */
 export interface HiddenModelsRequest {
   readonly hiddenModels: readonly string[]
+}
+
+/** Body of `POST /pinned-models`. An empty array removes the config key. */
+export interface PinnedModelsRequest {
+  readonly pinnedModels: readonly string[]
 }
 
 /** Body of `POST /enterprise-url`. An empty string resets to github.com. */

@@ -32,10 +32,11 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean; hidden?: string[] } = {}) {
+function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean; hidden?: string[]; pinned?: string[]; readOnly?: boolean; failSettings?: boolean } = {}) {
   const ctx = new Context()
   const enterpriseUrl = createVolatile('')
   const hiddenModels = createVolatile(options.hidden ?? [])
+  const pinnedModels = createVolatile(options.pinned ?? [])
   const routes = new Map<string, ConnectionFetchRoute>()
   const records = new Map<string, CredentialRecord>([
     ['llm-pi-ai/github-copilot', { kind: 'api-key', key: 'native-user-owned' }],
@@ -86,17 +87,21 @@ function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean;
     Object.defineProperty(self, Context.filter, { value: (owner: Context) => owner.fiber === entry.fiber })
     entry.emit(self, 'loader/volatile-update', [[field]])
   }
-  ctx.provide('settings', {
+  if (!options.readOnly) ctx.provide('settings', {
     configure() { return () => {} },
-    async update(_id: string, patch: { hiddenModels?: string[]; enterpriseUrl?: string }) {
+    async update(_id: string, patch: { hiddenModels?: string[]; pinnedModels?: string[]; enterpriseUrl?: string }) {
+      if (options.failSettings) throw new Error('fixture settings unavailable')
       settingWrites.push(patch)
       if (patch.hiddenModels) { updateVolatile(hiddenModels, createVolatile(patch.hiddenModels)); emitEdit('hiddenModels') }
+      if (patch.pinnedModels) { updateVolatile(pinnedModels, createVolatile(patch.pinnedModels)); emitEdit('pinnedModels') }
       if (patch.enterpriseUrl !== undefined) { updateVolatile(enterpriseUrl, createVolatile(patch.enterpriseUrl)); emitEdit('enterpriseUrl') }
     },
     async mutate(_id: string, operations: { path: string[] }[]) {
+      if (options.failSettings) throw new Error('fixture settings unavailable')
       settingWrites.push(operations)
       for (const { path } of operations) {
         if (path[0] === 'hiddenModels') updateVolatile(hiddenModels, createVolatile([]))
+        if (path[0] === 'pinnedModels') updateVolatile(pinnedModels, createVolatile([]))
         if (path[0] === 'enterpriseUrl') updateVolatile(enterpriseUrl, createVolatile(''))
         emitEdit(path[0]!)
       }
@@ -114,28 +119,30 @@ function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean;
   const mount = () => ctx.plugin({ apply(child: Context) {
     entry = child
     Object.defineProperty(child.fiber, 'entry', { value: { options: { id: 'bridge-fixture' } } })
-    apply(child, { enterpriseUrl, hiddenModels })
+    apply(child, { enterpriseUrl, hiddenModels, pinnedModels })
   } })
   const plugin = mount()
   t.after(async () => { await ctx.fiber.dispose() })
   return {
-    ctx, plugin, mount, mountLlm, nativeList, records, updates, requests, credentialWrites, settingWrites, hiddenModels,
+    ctx, plugin, mount, mountLlm, nativeList, records, updates, requests, credentialWrites, settingWrites, hiddenModels, pinnedModels,
     get runtime() { return runtime }, get exchanges() { return exchanges },
     authorize(next: typeof authorize) { authorize = next },
     pollAuthorization(next: typeof pollAuthorization) { pollAuthorization = next },
     discover(next: typeof discovery) { discovery = next }, infer(next: typeof inference) { inference = next },
     editHidden(next: string[]) { updateVolatile(hiddenModels, createVolatile(next)); emitEdit('hiddenModels') },
+    editPinned(next: string[]) { updateVolatile(pinnedModels, createVolatile(next)); emitEdit('pinnedModels') },
     editHost(next: string) { updateVolatile(enterpriseUrl, createVolatile(next)); emitEdit('enterpriseUrl') },
     setAccount(next: CredentialRecord | undefined) {
       if (next) records.set(BRIDGE_RECORD_KEY, next)
       else records.delete(BRIDGE_RECORD_KEY)
       ctx.emit('credentials/record-updated', credentialKey('copilot-bridge', 'github'))
     },
-    async request(path: string, body?: unknown) {
+    async request(path: string, body?: unknown, raw = false) {
       const route = routes.get(`/api/copilot-bridge/${path}`)
       assert.ok(route, `missing route ${path}`)
+      assert.ok(route.methods?.includes(body === undefined ? 'GET' : 'POST'))
       const response = await route.fetch(new Request(`https://localhost/api/copilot-bridge/${path}`, {
-        method: body === undefined ? 'GET' : 'POST', ...body === undefined ? {} : { body: JSON.stringify(body) },
+        method: body === undefined ? 'GET' : 'POST', ...body === undefined ? {} : { body: raw ? String(body) : JSON.stringify(body) },
       }))
       return { status: response.status, envelope: await response.json() }
     },
@@ -198,6 +205,121 @@ test('hide/reveal and all-hidden changes refresh only the bridge picker; routes 
   assert.deepEqual(h.credentialWrites, [])
 })
 
+test('pin route persists exact supported ids, deduplicates, rejects invalid input and unsets empty pins', async t => {
+  const h = host(t)
+  await h.picker()
+  const saved = await h.request('pinned-models', { pinnedModels: ['mai-code-2', 'gpt-6', 'mai-code-2'] })
+  assert.equal(saved.status, 200)
+  assert.equal(saved.envelope.ok, true)
+  assert.deepEqual(saved.envelope.value.pinnedModels, ['mai-code-2', 'gpt-6'])
+  assert.deepEqual((await h.request('status')).envelope.value.pinnedModels, ['mai-code-2', 'gpt-6'])
+  assert.deepEqual(h.settingWrites.at(-1), { pinnedModels: ['mai-code-2', 'gpt-6'] })
+  const writes = h.settingWrites.length
+  for (const body of [null, {}, [], { pinnedModels: null }, { pinnedModels: 'mai-code-2' },
+    { pinnedModels: [''] }, { pinnedModels: ['  '] }, { pinnedModels: [123] },
+    { pinnedModels: ['MAI-code-2'] }, { pinnedModels: [' mai-code-2 '] },
+    { pinnedModels: ['unknown'] }, { pinnedModels: ['claude-opus-5'] }, { pinnedModels: ['future-realtime'] }]) {
+    const invalid = await h.request('pinned-models', body)
+    assert.equal(invalid.status, 400)
+    assert.equal(invalid.envelope.ok, false)
+    assert.equal(typeof invalid.envelope.error, 'string')
+  }
+  assert.equal((await h.request('pinned-models', '{', true)).status, 400)
+  assert.equal((await h.request('pinned-models', '', true)).status, 400)
+  assert.equal(h.settingWrites.length, writes, 'invalid pin requests cannot mutate settings')
+  assert.deepEqual((await h.request('status')).envelope.value.pinnedModels, ['mai-code-2', 'gpt-6'])
+  const cleared = await h.request('pinned-models', { pinnedModels: [] })
+  assert.equal(cleared.status, 200)
+  assert.deepEqual(cleared.envelope.value.pinnedModels, [])
+  assert.deepEqual(h.settingWrites.at(-1), [{ op: 'unset', path: ['pinnedModels'] }])
+})
+
+for (const mode of ['read-only', 'write-failure'] as const) {
+  test(`pin route reports ${mode} settings without claiming a save or changing the picker`, async t => {
+    const h = host(t, { pinned: ['mai-code-2'], hidden: ['gpt-6'], readOnly: mode === 'read-only', failSettings: mode === 'write-failure' })
+    const before = await h.picker()
+    const updates = h.updates.length
+    for (const pinnedModels of [['gpt-6'], []]) {
+      const failed = await h.request('pinned-models', { pinnedModels })
+      assert.equal(failed.status, 500)
+      assert.equal(failed.envelope.ok, false)
+    }
+    const status = (await h.request('status')).envelope.value
+    assert.equal(status.configWritable, mode !== 'read-only')
+    assert.deepEqual(status.pinnedModels, ['mai-code-2'])
+    assert.deepEqual(status.hiddenModels, ['gpt-6'])
+    assert.deepEqual(await h.picker(), before)
+    assert.deepEqual(h.settingWrites, [])
+    assert.equal(h.updates.length, updates)
+  })
+}
+
+test('pins stably lead bridge picker and management rows without revealing hidden pins or changing resolution or native models', async t => {
+  const h = host(t, { hidden: ['mai-code-2'] })
+  await h.picker()
+  const savedModel = await h.runtime.resolveModelInfo(BRIDGE_PROVIDER, 'mai-code-2')
+  const before = h.updates.length
+  await h.request('pinned-models', { pinnedModels: ['kimi-k3', 'mai-code-2', 'gpt-6'] })
+  assert.deepEqual(await h.picker(), ['gpt-6', 'kimi-k3', 'claude-sonnet-5', 'grok-4.7', 'mai-code-2-flash', 'gemini-3-pro'])
+  const view = (await h.request('models')).envelope.value
+  assert.deepEqual(ids(view.models), ['gpt-6', 'mai-code-2', 'kimi-k3', 'claude-sonnet-5', 'claude-opus-5', 'gpt-5.4-nano', 'grok-4.7', 'mai-code-2-flash', 'gemini-3-pro', 'future-realtime'])
+  assert.deepEqual(view.status.hiddenModels, ['mai-code-2'])
+  assert.deepEqual(view.status.pinnedModels, ['kimi-k3', 'mai-code-2', 'gpt-6'])
+  assert.deepEqual(await h.runtime.resolveModelInfo(BRIDGE_PROVIDER, 'mai-code-2'), savedModel)
+  assert.ok(h.updates.length > before)
+  assert.ok(h.updates.every(provider => provider === BRIDGE_PROVIDER))
+  assert.deepEqual(ids(await h.runtime.listModels('github-copilot')), ['mai-code-2'])
+  assert.deepEqual(h.records.get('llm-pi-ai/github-copilot'), { kind: 'api-key', key: 'native-user-owned' })
+  assert.deepEqual(h.credentialWrites, [])
+  assert.equal(Object.hasOwn(h.runtime, 'listModels'), false)
+  await h.request('hidden-models', { hiddenModels: [] })
+  assert.deepEqual(await h.picker(), ['gpt-6', 'mai-code-2', 'kimi-k3', 'claude-sonnet-5', 'grok-4.7', 'mai-code-2-flash', 'gemini-3-pro'])
+  await h.request('pinned-models', { pinnedModels: [] })
+  assert.deepEqual(await h.picker(), supported)
+})
+
+test('catalog refresh retains pin preference but uses the new catalog-relative order within both groups', async t => {
+  const h = host(t, { pinned: ['gpt-6', 'mai-code-2', 'kimi-k3'] })
+  assert.deepEqual(await h.picker(), ['gpt-6', 'mai-code-2', 'kimi-k3', 'claude-sonnet-5', 'grok-4.7', 'mai-code-2-flash', 'gemini-3-pro'])
+  h.discover(async () => Response.json({ data: [...modelsPayload.data].reverse() }))
+  const refreshed = (await h.request('models/refresh', {})).envelope.value
+  assert.deepEqual(ids(refreshed.models), ['kimi-k3', 'mai-code-2', 'gpt-6', 'future-realtime', 'gemini-3-pro', 'mai-code-2-flash', 'grok-4.7', 'gpt-5.4-nano', 'claude-opus-5', 'claude-sonnet-5'])
+  assert.deepEqual(await h.picker(), ['kimi-k3', 'mai-code-2', 'gpt-6', 'gemini-3-pro', 'mai-code-2-flash', 'grok-4.7', 'claude-sonnet-5'])
+  await h.request('pinned-models', { pinnedModels: [] })
+  assert.deepEqual(await h.picker(), ['kimi-k3', 'gemini-3-pro', 'mai-code-2-flash', 'mai-code-2', 'grok-4.7', 'gpt-6', 'claude-sonnet-5'])
+})
+
+test('discovery failures and catalog changes preserve saved pins while only supported live ids can be newly pinned', async t => {
+  const h = host(t, { pinned: ['missing-from-catalog', 'mai-code-2'] })
+  h.discover(async () => new Response('unavailable', { status: 503 }))
+  await h.picker()
+  const failed = (await h.request('models')).envelope.value
+  assert.equal(failed.state, 'error')
+  assert.deepEqual(failed.status.pinnedModels, ['missing-from-catalog', 'mai-code-2'])
+  assert.deepEqual(h.settingWrites, [], 'discovery cannot prune saved pins')
+  assert.equal((await h.request('pinned-models', { pinnedModels: ['mai-code-2', 'gpt-6'] })).status, 400)
+  const kept = await h.request('pinned-models', { pinnedModels: ['missing-from-catalog', 'mai-code-2', 'mai-code-2'] })
+  assert.equal(kept.status, 200)
+  assert.deepEqual(kept.envelope.value.pinnedModels, ['missing-from-catalog', 'mai-code-2'])
+  h.discover(async () => Response.json(modelsPayload))
+  await h.request('models/refresh', {})
+  const extended = await h.request('pinned-models', { pinnedModels: ['missing-from-catalog', 'mai-code-2', 'gpt-6'] })
+  assert.equal(extended.status, 200)
+  assert.deepEqual(extended.envelope.value.pinnedModels, ['missing-from-catalog', 'mai-code-2', 'gpt-6'])
+  h.discover(async () => new Response('unavailable', { status: 503 }))
+  const retryable = (await h.request('models/refresh', {})).envelope.value
+  assert.equal(retryable.state, 'error')
+  assert.deepEqual(retryable.status.pinnedModels, ['missing-from-catalog', 'mai-code-2', 'gpt-6'])
+  assert.deepEqual(await h.picker(), ['gpt-6', 'mai-code-2', 'claude-sonnet-5', 'grok-4.7', 'mai-code-2-flash', 'gemini-3-pro', 'kimi-k3'])
+  h.discover(async () => Response.json({ data: [] }))
+  const empty = (await h.request('models/refresh', {})).envelope.value
+  assert.deepEqual(empty.models, [])
+  assert.deepEqual(empty.status.pinnedModels, ['missing-from-catalog', 'mai-code-2', 'gpt-6'])
+  assert.equal((await h.request('pinned-models', { pinnedModels: ['mai-code-2', 'gpt-6'] })).status, 200)
+  assert.deepEqual((await h.request('status')).envelope.value.pinnedModels, ['mai-code-2', 'gpt-6'])
+  assert.equal((await h.request('pinned-models', { pinnedModels: ['kimi-k3'] })).status, 400)
+})
+
 test('a failed initial discovery does not turn picker notifications into a retry loop; manual refresh recovers', async t => {
   const h = host(t)
   const gate = deferred<Response>()
@@ -237,8 +359,8 @@ test('manual refresh keeps the last good catalog and hidden ids after failure, t
   assert.deepEqual(await h.picker(), [])
 })
 
-test('sign-out discards discovery, clears hidden config, and empties the picker without changing native state', async t => {
-  const h = host(t, { hidden: ['mai-code-2'] })
+test('sign-out discards discovery, clears hidden and pinned config, and empties the picker without changing native state', async t => {
+  const h = host(t, { hidden: ['mai-code-2'], pinned: ['mai-code-2'] })
   const gate = deferred<Response>()
   h.discover(() => gate.promise)
   await settle()
@@ -247,8 +369,10 @@ test('sign-out discards discovery, clears hidden config, and empties the picker 
   const before = h.updates.length
   const logout = await h.request('logout', {})
   assert.equal(logout.envelope.value.authenticated, false)
+  assert.equal(logout.envelope.value.pinnedModels, undefined)
   assert.deepEqual(await h.picker(), [])
   assert.deepEqual(h.hiddenModels.get(), [])
+  assert.deepEqual(h.pinnedModels.get(), [])
   assert.ok(h.updates.length > before)
   gate.resolve(Response.json(modelsPayload))
   assert.deepEqual(await pending, [])
@@ -262,8 +386,8 @@ test('sign-out discards discovery, clears hidden config, and empties the picker 
   assert.deepEqual(await h.picker(), [])
 })
 
-test('host switch gates a preserved account, discards old discovery and resumes only for a matching signed-in host', async t => {
-  const h = host(t, { hidden: ['mai-code-2'] })
+test('host switch gates a preserved account, clears pins, discards old discovery and resumes only for a matching signed-in host', async t => {
+  const h = host(t, { hidden: ['mai-code-2'], pinned: ['mai-code-2'] })
   const gate = deferred<Response>()
   h.discover(() => gate.promise)
   await settle()
@@ -272,6 +396,7 @@ test('host switch gates a preserved account, discards old discovery and resumes 
   h.editHost('https://acme.ghe.com/')
   assert.deepEqual(await h.picker(), [])
   assert.deepEqual(h.hiddenModels.get(), [])
+  assert.deepEqual(h.pinnedModels.get(), [])
   const status = (await h.request('status')).envelope.value
   assert.equal(status.signedInHost, 'github.com')
   const before = h.requests.length
@@ -283,6 +408,39 @@ test('host switch gates a preserved account, discards old discovery and resumes 
   h.setAccount(account('enterprise-account', 'acme.ghe.com'))
   assert.deepEqual(await h.picker(), supported)
   assert.ok(h.requests.some(request => request.url === 'https://copilot-api.acme.ghe.com/models'))
+})
+
+test('external volatile pins update only the bridge and unload/reload leaves exactly one live listener', async t => {
+  const h = host(t)
+  await h.picker()
+  const before = h.updates.length
+  h.editPinned(['kimi-k3', 'mai-code-2'])
+  assert.deepEqual(h.updates.slice(before), [BRIDGE_PROVIDER])
+  assert.deepEqual(await h.picker(), ['mai-code-2', 'kimi-k3', 'claude-sonnet-5', 'gpt-6', 'grok-4.7', 'mai-code-2-flash', 'gemini-3-pro'])
+  await h.plugin.dispose()
+  const unloaded = h.updates.length
+  h.editPinned(['mai-code-2-flash'])
+  assert.equal(h.updates.length, unloaded)
+  const reloaded = h.mount()
+  assert.deepEqual(await h.picker(), ['mai-code-2-flash', 'claude-sonnet-5', 'gpt-6', 'grok-4.7', 'mai-code-2', 'gemini-3-pro', 'kimi-k3'])
+  const after = h.updates.length
+  h.editPinned([])
+  assert.deepEqual(h.updates.slice(after), [BRIDGE_PROVIDER])
+  assert.deepEqual(await h.picker(), supported)
+  assert.deepEqual(ids(await h.runtime.listModels('github-copilot')), ['mai-code-2'])
+  await reloaded.dispose()
+})
+
+test('enterprise URL route clears saved pins alongside hidden ids without deleting the native or bridge account', async t => {
+  const h = host(t, { pinned: ['mai-code-2'], hidden: ['mai-code-2'] })
+  await h.picker()
+  const changed = await h.request('enterprise-url', { enterpriseUrl: 'acme.ghe.com' })
+  assert.equal(changed.status, 200)
+  assert.deepEqual(changed.envelope.value.pinnedModels, [])
+  assert.deepEqual(h.pinnedModels.get(), [])
+  assert.deepEqual(h.hiddenModels.get(), [])
+  assert.deepEqual(await h.picker(), [])
+  assert.deepEqual(h.credentialWrites, [])
 })
 
 test('unload/reload disposes registration, routes, timers, pending discovery and listeners', async t => {
@@ -521,9 +679,9 @@ test('logout aborts an in-flight device poll response body without persisting or
   assert.equal(h.records.has(BRIDGE_RECORD_KEY), false)
 })
 
-test('completed device sign-in clears hidden config, discovers the live catalog and notifies the bridge picker', async t => {
+test('completed device sign-in clears hidden and pinned config, discovers the live catalog and notifies the bridge picker', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const h = host(t, { signedOut: true, hidden: ['mai-code-2'] })
+  const h = host(t, { signedOut: true, hidden: ['mai-code-2'], pinned: ['mai-code-2'] })
   assert.deepEqual(await h.picker(), [])
   assert.equal((await h.request('login', {})).envelope.value.state, 'pending')
   const before = h.updates.length
@@ -532,6 +690,8 @@ test('completed device sign-in clears hidden config, discovers the live catalog 
   assert.equal((await h.request('status')).envelope.value.state, 'authenticated')
   assert.deepEqual(await h.picker(), supported)
   assert.deepEqual(h.hiddenModels.get(), [])
+  assert.deepEqual(h.pinnedModels.get(), [])
+  assert.deepEqual((await h.request('status')).envelope.value.pinnedModels, [])
   assert.deepEqual(h.credentialWrites, [BRIDGE_RECORD_KEY])
   assert.ok(h.updates.length > before)
   assert.ok(h.updates.every(provider => provider === BRIDGE_PROVIDER))

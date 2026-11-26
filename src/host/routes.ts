@@ -2,6 +2,7 @@ import type { ConnectionFetchRoute } from '@deepseek-ai/dsh-client-connection'
 import { API_BASE, type ApiEnvelope, type EnterpriseUrlRequest, type CopilotUsage } from '../shared/contract.ts'
 import type { AuthController } from './auth-controller.ts'
 import { InvalidHiddenModelsError } from './hidden-models.ts'
+import { InvalidPinnedModelsError } from './pinned-models.ts'
 import { modelCatalog } from './model-catalog.ts'
 import type { CopilotMetadata } from './copilot-metadata.ts'
 import type { LiveCatalog } from './live-catalog.ts'
@@ -20,7 +21,7 @@ function route<T>(action: (request: Request) => Promise<T>): (request: Request) 
     try {
       return json(200, { ok: true, value: await action(request) })
     } catch (error) {
-      return json(error instanceof InvalidHiddenModelsError ? 400 : 500, { ok: false, error: errorMessage(error) })
+      return json(error instanceof InvalidHiddenModelsError || error instanceof InvalidPinnedModelsError ? 400 : 500, { ok: false, error: errorMessage(error) })
     }
   }
 }
@@ -53,6 +54,14 @@ export function authRoutes(
     {
       path: `${API_BASE}/enterprise-url`, methods: ['POST'], requestBody: 'buffered',
       fetch: route(async request => auth.setEnterpriseUrl(await readEnterpriseUrlRequest(request))),
+    },
+    {
+      path: `${API_BASE}/pinned-models`, methods: ['POST'], requestBody: 'buffered',
+      fetch: route(async request => {
+        let body: unknown
+        try { body = await request.json() } catch { throw new InvalidPinnedModelsError('request body must be {"pinnedModels": string[]}') }
+        return auth.setPinnedModels(typeof body === 'object' && body !== null && 'pinnedModels' in body ? body.pinnedModels : undefined)
+      }),
     },
     {
       path: `${API_BASE}/hidden-models`, methods: ['POST'], requestBody: 'buffered',

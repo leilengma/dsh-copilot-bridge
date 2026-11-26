@@ -28,6 +28,9 @@ class FakeCredentials implements CredentialStore {
 class FakeConfig implements BridgeConfig {
   value = ''
   hidden: string[] | undefined
+  pinned: string[] | undefined
+  readPinned() { return this.pinned ?? [] }
+  async writePinned(ids: readonly string[] | undefined) { this.pinned = ids === undefined ? undefined : [...ids] }
   canWrite = true
   failHiddenWrite = false
   readHidden() { return this.hidden ?? [] }

@@ -38,9 +38,14 @@ export interface Config {
   /** GitHub Enterprise URL or host (e.g. `https://octocorp.ghe.com/`); blank means github.com. */
   enterpriseUrl: Volatile<string>
   hiddenModels: Volatile<string[]>
+  pinnedModels: Volatile<string[]>
 }
 
 export const Config: z<Config> = z.object({
+  pinnedModels: z.array(z.string())
+    .description('GitHub Copilot model ids pinned to the top of bridge model selection. Cleared on sign-out and sign-in.')
+    .default([])
+    .volatile(),
   hiddenModels: z.array(z.string())
     .description('GitHub Copilot model ids hidden from model selection. Cleared on sign-out and sign-in.')
     .default([])
@@ -66,6 +71,15 @@ function bridgeConfig(ctx: Context, config: Config): BridgeConfig {
       }
       if (ids === undefined) await settings.mutate(entryId, [{ op: 'unset', path: ['hiddenModels'] }])
       else await settings.update(entryId, { hiddenModels: [...ids] })
+    },
+    readPinned: () => config.pinnedModels.get() ?? [],
+    async writePinned(ids) {
+      const settings = ctx.get('settings')
+      if (settings === undefined || entryId === undefined) {
+        throw new Error('saving pinned models needs the settings service and a profile entry')
+      }
+      if (ids === undefined) await settings.mutate(entryId, [{ op: 'unset', path: ['pinnedModels'] }])
+      else await settings.update(entryId, { pinnedModels: [...ids] })
     },
     async write(host) {
       const settings = ctx.get('settings')
@@ -150,8 +164,9 @@ export function apply(ctx: Context, config: Config): void {
       auth.cancelLogin()
       reset()
       void configStore.writeHidden(undefined).catch(error => ctx.logger.warn(`${name}: could not reset hidden models: ${errorMessage(error)}`))
+      void configStore.writePinned(undefined).catch(error => ctx.logger.warn(`${name}: could not reset pinned models: ${errorMessage(error)}`))
       void discover()
-    } else if (paths.some(path => path[0] === 'hiddenModels')) notify()
+    } else if (paths.some(path => path[0] === 'hiddenModels' || path[0] === 'pinnedModels')) notify()
   })
   ctx.inject(['credentials'], credentialsCtx => {
     void discover()
@@ -171,7 +186,7 @@ export function apply(ctx: Context, config: Config): void {
         if (started !== epoch || disposed) throw new Error('Copilot account changed')
         return snapshot
       } },
-      tokens, hidden: () => configStore.readHidden(),
+      tokens, hidden: () => configStore.readHidden(), pinned: () => configStore.readPinned(),
       get loadImage() {
         const attachments = llmCtx.get('attachments')
         if (attachments === undefined) return undefined

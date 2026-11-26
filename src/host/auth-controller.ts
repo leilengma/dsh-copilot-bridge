@@ -5,6 +5,7 @@ import {
 import type { DeviceAuthorization, PollResult } from './device-flow.ts'
 import { normalizeEnterpriseDomain } from './enterprise.ts'
 import { InvalidHiddenModelsError, validateHiddenModels } from './hidden-models.ts'
+import { InvalidPinnedModelsError, validatePinnedModels } from './pinned-models.ts'
 
 /** Live bridge configuration, persisted in the profile's `cordis.patch.yml`. */
 export interface BridgeConfig {
@@ -17,6 +18,9 @@ export interface BridgeConfig {
   readHidden(): readonly string[]
   /** Remove the key when undefined. */
   writeHidden(ids: readonly string[] | undefined): Promise<void>
+  readPinned(): readonly string[]
+  /** Remove the key when undefined. */
+  writePinned(ids: readonly string[] | undefined): Promise<void>
 }
 
 export interface AuthControllerDeps {
@@ -43,6 +47,7 @@ export interface AuthControllerDeps {
 export interface AuthController {
   status(): Promise<AuthStatus>
   setHiddenModels(input: unknown): Promise<AuthStatus>
+  setPinnedModels(input: unknown): Promise<AuthStatus>
   /** Start (or resume) a device flow; answers the already-authenticated status when signed in. */
   login(): Promise<AuthStatus>
   logout(): Promise<AuthStatus>
@@ -113,6 +118,7 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
     }
   }
   const resetHiddenModels = () => bestEffort('Could not reset hidden models', () => deps.config.writeHidden(undefined))
+  const resetPinnedModels = () => bestEffort('Could not reset pinned models', () => deps.config.writePinned(undefined))
 
   const status = async (): Promise<AuthStatus> => {
     const account = await readAccount()
@@ -134,6 +140,7 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
       state: 'authenticated',
       ...(signedInHost === base.githubHost ? {} : { signedInHost }),
       hiddenModels: [...new Set(deps.config.readHidden())].filter(id => modelIds === undefined || modelIds.includes(id)),
+      pinnedModels: [...new Set(deps.config.readPinned())],
       ...(modelIds === undefined ? {} : { modelCount: modelIds.length, availableModels: modelIds }),
     }
   }
@@ -169,6 +176,7 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
             return
           }
           await resetHiddenModels()
+          await resetPinnedModels()
           if (current !== generation) return
           finish('authenticated')
           deps.logger.info(`GitHub Copilot sign-in at ${device.domain} completed`)
@@ -208,6 +216,7 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
     cancelLogin()
     await deleteBridgeAccount(credentials)
     await resetHiddenModels()
+    await resetPinnedModels()
     await bestEffort('Sign-out follow-up failed', () => deps.onSignedOut?.())
     return status()
   }
@@ -234,5 +243,18 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
     return status()
   }
 
-  return { status, login, logout, setEnterpriseUrl, setHiddenModels, cancelLogin, dispose() { disposed = true; cancelLogin() } }
+  const setPinnedModels = async (input: unknown): Promise<AuthStatus> => {
+    const pinned = validatePinnedModels(input)
+    if (!deps.config.writable()) throw new Error('saving pinned models needs the settings service and a profile entry')
+    const known = await catalogIds()
+    const saved = new Set(deps.config.readPinned())
+    // Catalog outages or removals must not erase saved preferences; only additions need live support.
+    if (pinned.some(id => !saved.has(id) && !known?.includes(id))) {
+      throw new InvalidPinnedModelsError('pinnedModels contains an id not in the supported account model list')
+    }
+    await deps.config.writePinned(pinned.length === 0 ? undefined : pinned)
+    return status()
+  }
+
+  return { status, login, logout, setEnterpriseUrl, setHiddenModels, setPinnedModels, cancelLogin, dispose() { disposed = true; cancelLogin() } }
 }
