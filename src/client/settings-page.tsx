@@ -112,11 +112,11 @@ export function CopilotAccount({ status, onStatusChange, active }: {
   }
 
   useEffect(() => {
-    if (status?.state !== 'pending') return
+    if (status?.state !== 'pending' && status?.providerSetup !== 'pending') return
     setCopied(false)
     const timer = setInterval(() => { void refresh() }, 2000)
     return () => clearInterval(timer)
-  }, [status?.state, status?.userCode])
+  }, [status?.state, status?.userCode, status?.providerSetup])
 
   const logout = async () => {
     if (await act(api.logout)) {
@@ -168,8 +168,12 @@ export function CopilotAccount({ status, onStatusChange, active }: {
           ? (
             <>
               <p style={css.body}>{text('signedInAt', { host: status.signedInHost ?? status.githubHost })}</p>
+              {status.providerSetup === 'pending' ? <p role="status" style={css.hint}>{text('providerSetupPending')}</p> : null}
+              {status.providerSetup === 'warning' ? <div role="alert" style={css.field}>
+                <p style={css.body}>{text('providerSetupWarning')}</p>
+                <Button type="button" variant="outline" disabled={busy} onClick={() => { void act(api.login) }}>{text('providerSetupRetry')}</Button>
+              </div> : null}
               {active ? <AccountUsage issuer={status.signedInHost ?? status.githubHost} /> : null}
-              <p style={css.hint}>{text('whereToSelect', { provider: status.provider })}</p>
             </>
           )
           : null}

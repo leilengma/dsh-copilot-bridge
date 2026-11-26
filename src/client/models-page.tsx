@@ -72,6 +72,7 @@ export function CopilotModelsPage({ onStatusChange }: { readonly onStatusChange:
       {status?.authenticated === false ? <p style={css.body}>{text('modelsSignIn')}</p> : null}
       {status?.authenticated === true && status.availableModels === undefined ? <p style={css.hint}>{text('modelListPending')}</p> : null}
       {status?.authenticated === true && status.availableModels !== undefined && catalog !== undefined ? <>
+        {status.modelCatalogSource === 'provider' ? <p style={css.hint}>{text('providerCatalog')}</p> : null}
         <ModelsTable status={status} models={catalog.models.filter(model => status.availableModels?.includes(model.id))} busy={busy} onSave={save} />
         {!status.configWritable ? <p style={css.hint}>{text('hiddenModelsReadOnly')}</p> : null}
         {!!status.hiddenModels?.length ? <p style={css.hint}>{text('hiddenModelsWarning')}</p> : null}

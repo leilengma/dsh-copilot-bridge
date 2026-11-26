@@ -16,7 +16,7 @@ export const PI_AI_RECORD_KEY = `${PI_AI_RECORD_SCOPE}/${PI_AI_PROVIDER}`
 /** The public GitHub host, used when no enterprise host is configured. */
 export const GITHUB_DOTCOM = 'github.com'
 
-/** Device-flow progress, as shown by the Settings page and the commands. */
+/** Device-flow progress, as shown by the Account tab. */
 export type FlowState = 'signed-out' | 'pending' | 'authenticated' | 'expired' | 'denied' | 'error'
 
 /** Answer of `GET /status`, `POST /login`, `POST /logout`, and `POST /enterprise-url`. */
@@ -31,6 +31,8 @@ export interface AuthStatus {
   readonly enterpriseUrl: string
   /** Whether the Host can write `enterpriseUrl` into the profile's configuration file. */
   readonly configWritable: boolean
+  /** Post-sign-in provider configuration; absent until this session attempts setup. */
+  readonly providerSetup?: 'pending' | 'ready' | 'warning'
   /** Host the stored credential was issued by, when it differs from `githubHost`. */
   readonly signedInHost?: string
   /** Pending device flow: page to open. */
@@ -41,10 +43,12 @@ export interface AuthStatus {
   readonly expiresAt?: number
   /** Terminal flow message (expired / denied / error). */
   readonly message?: string
-  /** Models the Harness route recorded as available to this account. */
+  /** Size of the full management catalog (account-discovered, or provider fallback). */
   readonly modelCount?: number
-  /** Full, unfiltered account catalog, sorted; absent until recorded by pi-ai. */
+  /** Full, unfiltered management catalog, sorted; absent when no catalog is available. */
   readonly availableModels?: readonly string[]
+  /** Static provider fallback, not yet verified against this account's entitlements. */
+  readonly modelCatalogSource?: 'provider'
   /** Saved hidden ids, after pruning; only present when authenticated. */
   readonly hiddenModels?: readonly string[]
 }

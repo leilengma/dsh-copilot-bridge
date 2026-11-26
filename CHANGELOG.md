@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Populate Models immediately after provider setup using the full configured provider catalog until account-specific models are discovered. Label the fallback, keep hidden rows restorable, and give a known account catalog (including an empty one) precedence. Remove the redundant credential/model-picker hint from Account.
+
+- Fix Copilot models remaining selectable after sign-out: gate the static Harness catalog on the saved sign-in credential, discard discovery responses that finish after logout, and refresh cached pickers on credential changes. Keep the provider configuration and restore models on a new sign-in; other providers are unchanged.
+
+- After sign-in, detect an existing Harness `github-copilot` provider and create its native profile only when absent, then refresh model pickers. Preserve existing settings and retain the provider on sign-out. Read-only, concurrent-edit or setup failures keep the user signed in and show manual setup guidance with an OAuth-free retry; continue status polling until provider setup finishes.
+
 - Add a GitHub Copilot sidebar entry that opens Account/Models in a full-page panel. Keep an **Open GitHub Copilot** shortcut in the installed plugin page instead of embedding the controls there.
 
 - Add the supplied GitHub Copilot plugin artwork, automatically rendered black in light mode and white in dark mode. Register an installed-bundle configuration shortcut so the plugin header uses package artwork rather than the official-settings fallback; export English and Chinese display metadata.

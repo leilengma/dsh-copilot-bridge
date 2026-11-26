@@ -13,17 +13,19 @@
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 // Type-only: augment `Context` with `credentials`, `settings`, `connection`, and `fiber.entry`.
-import type {} from '@deepseek-ai/dsh-credentials'
+import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
-import { PI_AI_PROVIDER, PI_AI_RECORD_KEY } from '../shared/contract.ts'
+import { PI_AI_PROVIDER, PI_AI_RECORD_KEY, PI_AI_RECORD_SCOPE } from '../shared/contract.ts'
 import { createAuthController, type AuthController, type BridgeConfig } from './auth-controller.ts'
 import { pollDeviceFlow, startDeviceFlow } from './device-flow.ts'
 import { createCopilotUsage } from './copilot-usage.ts'
 import { createCopilotMetadata } from './copilot-metadata.ts'
 import { authRoutes } from './routes.ts'
 import { filterModelSelection } from './model-selection.ts'
+import { ensureCopilotProvider } from './provider-setup.ts'
+import { grantToken } from './grant.ts'
 
 export const name = 'copilot-bridge'
 
@@ -93,9 +95,21 @@ function registerRoutes(ctx: Context, auth: AuthController): void {
 }
 
 export function apply(ctx: Context, config: Config): void {
+  let providerModelIds: (() => Promise<readonly string[]>) | undefined
   const auth = createAuthController({
     credentials: () => ctx.get('credentials'),
     config: bridgeConfig(ctx, config),
+    providerModelIds: async () => providerModelIds?.(),
+    ensureProvider: () => ensureCopilotProvider({
+      settings: () => ctx.get('settings'),
+      llm: () => ctx.get('llm'),
+      async refresh() {
+        const llm = ctx.get('llm')
+        if (llm === undefined) throw new Error('the LLM service is unavailable')
+        await llm.listModels(PI_AI_PROVIDER)
+        await ctx.parallel('llm/models-updated', PI_AI_PROVIDER)
+      },
+    }),
     startDeviceFlow,
     pollDeviceFlow,
     logger: {
@@ -115,8 +129,21 @@ export function apply(ctx: Context, config: Config): void {
         .catch(error => ctx.logger.warn(`${name}: model selection refresh failed: ${errorMessage(error)}`))
     }
     llmCtx.effect(() => {
-      const dispose = filterModelSelection(llmCtx.llm, () => config.hiddenModels.get() ?? [])
-      return () => { dispose(); notify() }
+      // A fresh grant has no account model ids. Keep a full provider catalog
+      // reader for management; going through our picker filter loses hidden rows.
+      const runtime = llmCtx.llm
+      const original = runtime.listModels
+      const fullCatalog = async () => (await original.call(runtime, PI_AI_PROVIDER)).map(model => model.id)
+      providerModelIds = fullCatalog
+      const dispose = filterModelSelection(runtime, () => config.hiddenModels.get() ?? [], async () => {
+        const record = await llmCtx.get('credentials')?.readRecord(credentialKey(PI_AI_RECORD_SCOPE, PI_AI_PROVIDER))
+        return grantToken(record) !== undefined
+      })
+      return () => {
+        if (providerModelIds === fullCatalog) providerModelIds = undefined
+        dispose()
+        notify()
+      }
     }, `${name}: model selection filter`)
     notify()
     // Loader targets only the entry fiber, not this injected child's fiber.
@@ -124,6 +151,15 @@ export function apply(ctx: Context, config: Config): void {
     llmCtx.effect(() => ctx.on('loader/volatile-update', paths => {
       if (paths.some(path => path[0] === 'hiddenModels')) notify()
     }), `${name}: model selection config updates`)
+    // The adapter's static catalog does not change on logout. Explicitly
+    // invalidate cached pickers when the grant changes, even with no hidden ids.
+    llmCtx.effect(() => ctx.on('credentials/record-updated', key => {
+      if (key === PI_AI_RECORD_KEY) notify()
+    }), `${name}: model selection credential updates`)
+    llmCtx.inject(['credentials'], credentialsCtx => {
+      notify()
+      credentialsCtx.effect(() => () => notify(), `${name}: model selection credentials lifetime`)
+    })
   })
 
   // This plugin ships its own Settings page; hide the generated form.

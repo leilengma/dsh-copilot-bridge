@@ -141,6 +141,7 @@ test('Account owns sign-in and host controls; Models is absent until authenticat
   const html = ui.renderTabs({ status, tab: 'account', onTabChange: () => {}, onStatusChange: () => {} })
   assert.match(html, />Models</)
   assert.match(html, /Sign out/)
+  assert.doesNotMatch(html, /Your credential is available|Select a Copilot model in the model picker/)
   assert.doesNotMatch(html, /<h2[^>]*>GitHub Copilot<\/h2>/)
   assert.ok(html.indexOf('Signed in at github.com.') < html.indexOf('aria-label="Account usage"'))
   assert.doesNotMatch(html, /GitHub Enterprise URL|>GitHub host</)
@@ -148,6 +149,23 @@ test('Account owns sign-in and host controls; Models is absent until authenticat
   assert.match(models, /role="tab"[^>]*aria-selected="true"[^>]*>Models</)
   assert.match(models, /Loading models/)
   assert.doesNotMatch(models, /aria-label="Account usage"/)
+})
+
+test('Account distinguishes provider setup progress/failure from successful authentication', () => {
+  const render = (providerSetup: 'pending' | 'ready' | 'warning') => ui.renderTabs({
+    status: { ...status, providerSetup }, tab: 'account', onTabChange: () => {}, onStatusChange: () => {},
+  })
+  const pending = render('pending')
+  assert.match(pending, /Setting up the GitHub Copilot provider/)
+  assert.match(pending, /Sign out/)
+  const warning = render('warning')
+  assert.match(warning, /Signed in, but automatic provider setup could not complete/)
+  assert.match(warning, /Settings → Models/)
+  assert.match(warning, /leave the API key blank/)
+  assert.match(warning, /Retry provider setup/)
+  assert.match(warning, /Sign out/)
+  assert.doesNotMatch(warning, />Sign in</)
+  assert.doesNotMatch(render('ready'), /Retry provider setup|automatic provider setup could not complete|Setting up/)
 })
 
 test('model table exposes accessible eye toggles, search and real metadata without invented costs', () => {

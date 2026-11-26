@@ -50,6 +50,21 @@ test('Host exposes account routes without registering chat authentication comman
 test('the actual LLM catalog boundary hides models even when the adapter ignores credentials', async () => {
   const ctx = new Context()
   const hiddenModels = createVolatile(['a'])
+  const routes = new Map<string, ConnectionFetchRoute>()
+  ctx.provide('connection', { fetch: { register(route: ConnectionFetchRoute) {
+    routes.set(route.path, route)
+    return async () => { routes.delete(route.path) }
+  } } })
+  const management = async () => {
+    const response = await routes.get('/api/copilot-bridge/models')!.fetch(new Request('https://localhost/api/copilot-bridge/models'))
+    assert.equal(response.status, 200)
+    return (await response.json()).value
+  }
+  ctx.provide('credentials', {
+    async readRecord() { return { kind: 'grant', payload: { refresh: 'ghu_test' } } },
+    async modifyRecord() { return undefined },
+    async deleteRecord() {},
+  })
   const updates: string[] = []
   ctx.on('llm/models-updated', provider => { updates.push(provider) })
   // Exercise late service mounting and plugin disposal, not just a local wrapper call.
@@ -72,11 +87,16 @@ test('the actual LLM catalog boundary hides models even when the adapter ignores
   assert.deepEqual((await consumer.listModels('other')).map(model => model.id), ['a', 'b', 'A'])
   assert.deepEqual((await consumer.resolveModelInfo('github-copilot', 'a')).id, 'a', 'hiding is advisory, not a routing block')
   assert.deepEqual((await consumer.listModels('github-copilot'))[0]?.inputModalities, ['text'])
+  const catalog = await management()
+  assert.equal(catalog.status.modelCatalogSource, 'provider')
+  assert.deepEqual(catalog.status.availableModels, ['A', 'a', 'b'])
+  assert.deepEqual(catalog.models.map((model: { id: string }) => model.id), ['A', 'a', 'b'], 'a grant without account ids must still populate Models before any chat request')
 
   const before = updates.length
   updateVolatile(hiddenModels, createVolatile(['a', 'b', 'A']))
   emitEdit()
   assert.deepEqual(await consumer.listModels('github-copilot'), [])
+  assert.equal((await management()).models.length, 3, 'hiding every model must not empty the management table')
   assert.ok(updates.length > before, 'cached selectors must receive a models-updated notification')
   updateVolatile(hiddenModels, createVolatile([]))
   emitEdit()
@@ -89,6 +109,55 @@ test('the actual LLM catalog boundary hides models even when the adapter ignores
   assert.equal((await consumer.listModels('github-copilot')).length, 3)
   assert.ok(updates.length > beforeDispose, 'unload must also refresh cached selectors')
   await ctx.fiber.dispose()
+})
+
+test('sign-out empties cached Copilot selectors while preserving its configured route and other providers', async () => {
+  const ctx = new Context()
+  const routes = new Map<string, ConnectionFetchRoute>()
+  ctx.provide('connection', { fetch: { register(route: ConnectionFetchRoute) {
+    routes.set(route.path, route)
+    return async () => { routes.delete(route.path) }
+  } } })
+  let record: CredentialRecord | undefined = { kind: 'grant', payload: { refresh: 'ghu_test' } }
+  ctx.provide('credentials', {
+    async readRecord() { return record },
+    async modifyRecord() { return record },
+    async deleteRecord() { record = undefined; ctx.emit('credentials/record-updated', PI_AI_RECORD_KEY) },
+  })
+  const runtime = new LlmRuntime(ctx)
+  runtime.registerAdapter(['github-copilot', 'other'], new StaticCatalog())
+  let cached: string[] = []
+  let refreshes = 0
+  ctx.on('llm/models-updated', async provider => {
+    if (provider === 'github-copilot') {
+      cached = (await ctx.llm.listModels(provider)).map(model => model.id)
+      refreshes++
+    }
+  })
+  try {
+    apply(ctx, { enterpriseUrl: createVolatile(''), hiddenModels: createVolatile([]) })
+    await settle()
+    assert.deepEqual(cached, ['a', 'b', 'A'])
+    const before = refreshes
+    const logout = routes.get('/api/copilot-bridge/logout')!
+    const response = await logout.fetch(new Request('https://localhost/api/copilot-bridge/logout', { method: 'POST' }))
+    assert.equal(response.status, 200)
+    assert.equal((await response.json()).value.authenticated, false)
+    await settle()
+    assert.ok(refreshes > before, 'sign-out must invalidate a populated model picker, even without hidden models')
+    assert.deepEqual(cached, [])
+    assert.deepEqual(await ctx.llm.listModels('github-copilot'), [])
+    assert.ok(ctx.llm.listProviders().some(provider => provider.id === 'github-copilot'))
+    assert.equal((await ctx.llm.listModels('other')).length, 3)
+    record = { kind: 'grant', payload: { refresh: 'ghu_test_again' } }
+    ctx.emit('credentials/record-updated', PI_AI_RECORD_KEY)
+    await settle()
+    assert.deepEqual(cached, ['a', 'b', 'A'], 'a new sign-in must repopulate existing selectors without a restart')
+    record = undefined
+    ctx.emit('credentials/record-updated', PI_AI_RECORD_KEY)
+    await settle()
+    assert.deepEqual(cached, [], 'external credential deletion also invalidates cached selectors')
+  } finally { await ctx.fiber.dispose() }
 })
 
 test('Host mount, pi-ai record events, and volatile YAML edits re-filter without a status request', async () => {
