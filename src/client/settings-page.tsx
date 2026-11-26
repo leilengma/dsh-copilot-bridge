@@ -5,6 +5,7 @@ import { api, errorMessage } from './api.ts'
 import { AccountUsage } from './account-usage.tsx'
 import { DeviceCodeField, StateLabel } from './components.tsx'
 import { text, useLocaleRevision } from './i18n.ts'
+import { CopilotProviderCardNotice } from './provider-card.tsx'
 import { authRevision } from './store.ts'
 import { css } from './styles.ts'
 
@@ -131,6 +132,7 @@ export function CopilotAccount({ status, onStatusChange, active }: {
   return (
     <section style={css.section}>
       <p style={css.intro}>{text('intro')}</p>
+      <CopilotProviderCardNotice />
 
       {!authenticated ? <EnterpriseUrlCard status={status} busy={busy} onSave={value => act(() => api.setEnterpriseUrl(value))} /> : null}
 
