@@ -22,15 +22,22 @@ const compiled = buildSync({
     export const commandHooks = []
     import { authRevision } from './src/client/store.ts'
     const slots = []
+    const selectedPanels = []
     const remoteListeners = new Map()
     apply({
+      layout: { selectPanel: id => selectedPanels.push(id) },
       locale: { register: () => () => {}, getSnapshot: () => ({ active: 'en', revision: 0 }), subscribe: () => () => {} },
       effect: f => f(), on: event => { commandHooks.push(event); return () => {} }, remote: { $on: (event, listener) => { remoteListeners.set(event, listener); return () => remoteListeners.delete(event) } },
       commandUi: { decorate: decoration => { commandHooks.push(decoration.name); return () => {} } }, sessions: {},
       slots: { inject: (_name, f) => f(), register: (slot, component) => { slots.push({slot, component}); return () => {} } },
     })
-    export const registrations = slots.map(({slot}) => ({ name: slot.name, id: slot.id, label: slot.label?.() }))
-    export const summary = renderToStaticMarkup(createElement(slots.find(({slot}) => slot.name === 'plugins.item').component, { view: 'summary' }))
+    export const registrations = slots.map(({slot}) => ({ name: slot.name, id: slot.id, key: slot.key }))
+    const configSlot = slots.find(({slot}) => slot.name === 'plugins.bundle.config')
+    export const config = renderToStaticMarkup(createElement(configSlot.component, configSlot.slot.inject?.()))
+    export const main = slots.some(({slot}) => slot.name === 'main') ? renderToStaticMarkup(createElement(slots.find(({slot}) => slot.name === 'main').component)) : ''
+    export const openConfig = () => { configSlot.slot.inject?.().onOpen(); return selectedPanels.at(-1) }
+    export const sidebarLabel = () => slots.find(({slot}) => slot.name === 'sidebar.panellist')?.slot.label()
+    export const sidebarIcon = slots.some(({slot}) => slot.name === 'sidebar.panellist') ? renderToStaticMarkup(createElement(slots.find(({slot}) => slot.name === 'sidebar.panellist').component, { size: 18, active: true })) : ''
     export const renderTabs = props => renderToStaticMarkup(createElement(CopilotPluginTabs, props))
     export const renderUsage = props => renderToStaticMarkup(createElement(UsageDisplay, props))
     export const renderTable = props => renderToStaticMarkup(createElement(ModelsTable, props))
@@ -40,16 +47,21 @@ const compiled = buildSync({
   `, resolveDir: fileURLToPath(new URL('../', import.meta.url)), loader: 'tsx' },
   bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
   alias: { '@deepseek-ai/dsh-client-ui-primitives': fileURLToPath(new URL('./fixtures/ui-primitives.tsx', import.meta.url)) },
+  loader: { '.svg': 'dataurl' },
   define: { __PLUGIN_VERSION__: '"test"' },
 }).outputFiles[0]
 assert.ok(compiled)
 const bundled = { exports: {} }
 new Function('require', 'module', 'exports', compiled.text)(createRequire(import.meta.url), bundled, bundled.exports)
 const ui = bundled.exports as {
-  registrations: { name: string; id: string; label?: string }[]
+  registrations: { name: string; id?: string; key?: string }[]
   injections: string[]
   commandHooks: string[]
-  summary: string
+  config: string
+  main: string
+  sidebarIcon: string
+  sidebarLabel: () => string
+  openConfig: () => string
   getRevision: () => number
   subscribeToRevision: (listener: () => void) => () => void
   emitRemote: (event: string, key: string) => void
@@ -92,13 +104,29 @@ test('client has no chat command hooks, session dependencies, or composer login 
   assert.equal(ui.registrations.some(slot => slot.name === 'conversation.input.overlay'), false)
 })
 
-test('client registers GitHub Copilot only inside Plugins, not a separate Settings section', () => {
-  assert.deepEqual(ui.registrations.find(slot => slot.name === 'plugins.item'), { name: 'plugins.item', id: 'copilot-bridge-models', label: 'GitHub Copilot' })
+test('client config belongs to its installed bundle so the host uses package artwork, not an official-item fallback', () => {
+  assert.deepEqual(ui.registrations.find(slot => slot.name === 'plugins.bundle.config'), { name: 'plugins.bundle.config', key: 'dsh-copilot-bridge', id: undefined })
+  assert.equal(ui.registrations.some(slot => slot.name === 'plugins.item'), false)
   assert.equal(ui.registrations.some(slot => slot.name === 'settings.section' && slot.id === 'copilot-bridge'), false)
   assert.equal(ui.registrations.some(slot => slot.name === 'settings.section.icon' && slot.id === 'copilot-bridge'), false)
-  assert.match(ui.summary, /account|Account/)
-  assert.match(ui.summary, /models/)
-  assert.doesNotMatch(ui.summary, /<table|<input/)
+  assert.match(ui.config, /Open GitHub Copilot/)
+  assert.doesNotMatch(ui.config, /role="tab"|<table|<input/)
+})
+
+test('sidebar entry opens a matching full-page main panel with Account and Models', () => {
+  assert.ok(ui.injections.includes('layout'))
+  const entry = ui.registrations.find(slot => slot.name === 'sidebar.panellist')
+  assert.equal(entry?.id, 'copilot-bridge')
+  assert.equal(ui.registrations.find(slot => slot.name === 'main')?.key, entry?.id)
+  assert.equal(ui.sidebarLabel(), 'GitHub Copilot')
+  assert.match(ui.sidebarIcon, /<img[^>]*src="data:image\/svg\+xml/)
+  assert.match(ui.sidebarIcon, /width="18"[^>]*height="18"/)
+  assert.equal(ui.openConfig(), entry?.id)
+  assert.match(ui.main, /<h1[^>]*>GitHub Copilot</)
+  assert.match(ui.main, /overflow-y:auto/)
+  assert.match(ui.main, /role="tab"[^>]*>Account</)
+  assert.match(ui.main, /GitHub Enterprise URL/)
+  assert.doesNotMatch(ui.main, />Models<|<table/)
 })
 
 test('Account owns sign-in and host controls; Models is absent until authentication succeeds', () => {

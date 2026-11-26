@@ -18,12 +18,6 @@ export interface LocaleRuntime {
   subscribe(listener: () => void): Dispose
 }
 
-interface SlotBase {
-  readonly id: string
-  readonly order?: number
-  readonly locale?: string
-}
-
 /**
  * Owner props of the Models page `settings.models.provider-card` keyed slot
  * (`@deepseek-ai/dsh-client-ui-settings-models` slot-contract), trimmed to
@@ -40,8 +34,22 @@ export interface ProviderCardProps {
 
 /** `@deepseek-ai/dsh-client-ui-renderer`: the UI slot registry. */
 export interface SlotRegistry {
-  /** Plugins page list item: summary on its card, page when the card is opened. */
-  register(slot: SlotBase & { readonly name: 'plugins.item'; readonly label: () => string }, component: ComponentType<{ readonly view: 'summary' | 'page' }>): Dispose
+  /** Layout main panel and matching host-owned sidebar navigation entry. */
+  register(slot: { readonly name: 'main'; readonly key: string; readonly locale?: string }, component: ComponentType): Dispose
+  register(slot: {
+    readonly name: 'sidebar.panellist'
+    readonly id: string
+    readonly order?: number
+    readonly label: () => string
+    readonly locale?: string
+  }, component: ComponentType<{ readonly size: number; readonly active: boolean }>): Dispose
+  /** Bundle configuration: keyed by npm package name, rendered under its metadata/icon header. */
+  register(slot: {
+    readonly name: 'plugins.bundle.config'
+    readonly key: string
+    readonly locale?: string
+    readonly inject: () => { readonly onOpen: () => void }
+  }, component: ComponentType<{ readonly onOpen: () => void }>): Dispose
   /** Keyed slot: one entry per `key` and `priority`; a second entry at an occupied cell throws. */
   register(slot: {
     readonly name: 'settings.models.provider-card'
@@ -60,6 +68,8 @@ export interface ClientRemote {
 
 /** The client plugin context, restricted to the services listed in `inject`. */
 export interface ClientContext {
+  /** @deepseek-ai/dsh-client-ui-layout: selects a registered main slot key. */
+  readonly layout: { selectPanel(panelId: string): void }
   readonly locale: LocaleRuntime
   readonly slots: SlotRegistry
   readonly remote: ClientRemote

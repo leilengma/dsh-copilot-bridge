@@ -3,6 +3,7 @@
   "description": "GitHub Copilot sign-in for DeepSeek Harness, including GitHub Enterprise hosts (e.g. <company>.ghe.com), for its built-in github-copilot route",
   "version": "0.1.0",
   "license": "MIT",
+  "icon": "assets/github-copilot.svg",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -12,6 +13,8 @@
     "./client": {
       "default": "./lib/client.js"
     },
+    "./icon": "./assets/github-copilot.svg",
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "files": [
@@ -19,6 +22,8 @@
     "README.md",
     "CHANGELOG.md",
     "cordis.patch.yml",
+    "assets/github-copilot.svg",
+    "locale/*.json",
     "lib/index.js",
     "lib/client.js"
   ],

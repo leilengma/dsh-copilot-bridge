@@ -4,7 +4,7 @@
 import type { ClientContext } from './harness.ts'
 import { PI_AI_RECORD_KEY } from '../shared/contract.ts'
 import { DICTIONARIES, LOCALE_NS, bindLocale, text } from './i18n.ts'
-import { CopilotPluginEntry } from './plugin-page.tsx'
+import { CopilotIcon, CopilotPanel, CopilotShortcut } from './navigation.tsx'
 import { CopilotProviderCardNotice } from './provider-card.tsx'
 import { bumpAuthRevision } from './store.ts'
 
@@ -12,7 +12,7 @@ const SECTION_ID = 'copilot-bridge'
 /** Settings namespace of the pi-ai adapter that owns the `github-copilot` route; the provider-card slot key. */
 const PI_AI_SETTINGS_NS = 'llm-pi-ai'
 
-export const inject = ['slots', 'locale', 'remote']
+export const inject = ['slots', 'locale', 'remote', 'layout']
 
 export function apply(ctx: ClientContext): void {
   bindLocale(ctx.locale)
@@ -32,13 +32,27 @@ export function apply(ctx: ClientContext): void {
     `${SECTION_ID}: refresh discovered models`,
   )
 
-  ctx.slots.inject('plugins.item', () => ctx.slots.register({
-    name: 'plugins.item',
-    id: `${SECTION_ID}-models`,
-    order: 20,
+  // Host navigation owns sidebar selection, collapsed-row tooltips, and panel lifecycle.
+  ctx.slots.inject('main', () => ctx.slots.register({
+    name: 'main',
+    key: SECTION_ID,
     locale: LOCALE_NS,
+  }, CopilotPanel))
+  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+    name: 'sidebar.panellist',
+    id: SECTION_ID,
+    order: 10,
     label: () => text('nav'),
-  }, CopilotPluginEntry))
+    locale: LOCALE_NS,
+  }, CopilotIcon))
+
+  // Keep the installed bundle's metadata/icon and offer a full-page shortcut.
+  ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
+    name: 'plugins.bundle.config',
+    key: 'dsh-copilot-bridge',
+    locale: LOCALE_NS,
+    inject: () => ({ onOpen: () => ctx.layout.selectPanel(SECTION_ID) }),
+  }, CopilotShortcut))
 
   // Models page: tell the user the github-copilot card needs no API key. The
   // slot is keyed by adapter namespace, so the entry receives every pi-ai

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add a GitHub Copilot sidebar entry that opens Account/Models in a full-page panel. Keep an **Open GitHub Copilot** shortcut in the installed plugin page instead of embedding the controls there.
+
+- Add the supplied GitHub Copilot plugin artwork, automatically rendered black in light mode and white in dark mode. Register an installed-bundle configuration shortcut so the plugin header uses package artwork rather than the official-settings fallback; export English and Chinese display metadata.
+
 - Remove the `/copilot-login`, `/copilot-status` and `/copilot-logout` chat commands, their composer device-code dialog and command UI hooks. Sign-in, status and sign-out remain available under **Plugins → GitHub Copilot → Account**.
 
 - Show authenticated account credit usage below **Signed in at …**, with a progress bar, provider reset time, exact used/total on hover or keyboard focus, and a manual refresh icon. Refresh on opening Account and credential changes without polling; keep OAuth credentials and raw quota responses on the host. Remove the duplicate Account-tab title and hide GitHub host configuration while signed in.
