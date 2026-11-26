@@ -26,7 +26,7 @@ import { authRoutes } from './routes.ts'
 import { readBridgeAccount } from './bridge-credentials.ts'
 import { createAccessTokens } from './access-token.ts'
 import { createLiveCatalog, type LiveCatalog } from './live-catalog.ts'
-import { BridgeAdapter } from './bridge-adapter.ts'
+import { BridgeAdapter, type ImageAttachment } from './bridge-adapter.ts'
 import { normalizeEnterpriseDomain } from './enterprise.ts'
 
 export const name = 'copilot-bridge'
@@ -88,7 +88,7 @@ function registerRoutes(ctx: Context, auth: AuthController, catalog: LiveCatalog
   ctx.inject(['connection'], connectionCtx => {
     connectionCtx.effect(() => {
       const { fetch } = connectionCtx.connection
-      const disposers = authRoutes(auth, catalog, metadata, usage).map(route => fetch.register(route))
+      const disposers = authRoutes(auth, catalog, metadata, usage, () => ctx.get('attachments') !== undefined).map(route => fetch.register(route))
       return async () => {
         for (const dispose of disposers.reverse()) await dispose()
       }
@@ -165,8 +165,20 @@ export function apply(ctx: Context, config: Config): void {
         return account === undefined ? { generation: -1, models: [] } : catalog.ready()
       } },
       tokens, hidden: () => configStore.readHidden(),
+      get loadImage() {
+        const attachments = llmCtx.get('attachments')
+        if (attachments === undefined) return undefined
+        return async (ref: ImageAttachment, signal?: AbortSignal) => {
+          const image = await attachments.readImage(ref, signal)
+          return { data: Buffer.from(image.data).toString('base64'), mimeType: image.ref.mediaType }
+        }
+      },
     })
     llmCtx.llm.registerAdapter([BRIDGE_PROVIDER], adapter)
+    llmCtx.inject(['attachments'], attachmentsCtx => {
+      notify()
+      attachmentsCtx.effect(() => () => notify(), `${name}: attachment capabilities lifetime`)
+    })
   })
 
   // This plugin ships its own Settings page; hide the generated form.

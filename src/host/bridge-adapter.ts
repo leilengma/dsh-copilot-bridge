@@ -43,7 +43,7 @@ export interface BridgeAdapterDeps {
   /** Passed to pi-ai for every provider request. */
   readonly fetch?: typeof globalThis.fetch
   /** Load image bytes for a vision request; without it image blocks are rejected. */
-  readonly loadImage?: (ref: ImageAttachment) => Promise<{ readonly data: string; readonly mimeType: string }>
+  readonly loadImage?: ((ref: ImageAttachment, signal?: AbortSignal) => Promise<{ readonly data: string; readonly mimeType: string }>) | undefined
 }
 
 const DEFAULT_TRANSPORTS: Record<CatalogProtocol, BridgeTransport> = {
@@ -93,14 +93,14 @@ export function supportedEfforts(model: Pick<SupportedCatalogModel, 'reasoningEf
   return THINKING_LEVELS.filter(level => model.reasoningEfforts.includes(level))
 }
 
-function modelInfo(model: SupportedCatalogModel): LlmModelInfo {
-  return { provider: BRIDGE_PROVIDER, id: model.id, name: model.name, inputModalities: [...model.input] }
+function modelInfo(model: SupportedCatalogModel, vision: boolean): LlmModelInfo {
+  return { provider: BRIDGE_PROVIDER, id: model.id, name: model.name, inputModalities: model.input.filter(input => input !== 'image' || vision) }
 }
 
-function resolvedInfo(model: SupportedCatalogModel): LlmResolvedModelInfo {
+function resolvedInfo(model: SupportedCatalogModel, vision: boolean): LlmResolvedModelInfo {
   const efforts = supportedEfforts(model)
   return {
-    ...modelInfo(model),
+    ...modelInfo(model, vision),
     ...model.contextWindow === undefined ? {} : { context: { contextWindow: model.contextWindow } },
     ...efforts.length === 0 ? {} : {
       reasoning: { efforts: efforts.map(level => ({ id: ReasoningEffortId(level), name: capitalize(level) })) },
@@ -214,9 +214,10 @@ async function toContext(options: GenerateOptions, model: SupportedCatalogModel,
       else if (block.type === 'image') {
         if (block.offloaded) result.push({ type: 'text', text: offloadedImageText(block.attachment) })
         else if (!vision) result.push({ type: 'text', text: textOnlyImageText(block.attachment) })
-        else if (!deps.loadImage) throw new LlmError('Image input is not available for this route', 'UNSUPPORTED_CONTENT')
         else {
-          const image = await deps.loadImage(block.attachment)
+          const loadImage = deps.loadImage
+          if (!loadImage) throw new LlmError('Image input is not available for this route', 'UNSUPPORTED_CONTENT')
+          const image = await loadImage(block.attachment, options.signal)
           result.push({ type: 'image', data: image.data, mimeType: image.mimeType })
         }
       }
@@ -351,11 +352,11 @@ export class BridgeAdapter extends LlmAdapter {
       return []
     }
     const hidden = new Set(this.deps.hidden())
-    return snapshot.models.flatMap(model => model.supported && !hidden.has(model.id) ? [modelInfo(model)] : [])
+    return snapshot.models.flatMap(model => model.supported && !hidden.has(model.id) ? [modelInfo(model, this.deps.loadImage !== undefined)] : [])
   }
 
   override async resolveModel(_provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
-    return resolvedInfo((await this.supported(model, signal)).model)
+    return resolvedInfo((await this.supported(model, signal)).model, this.deps.loadImage !== undefined)
   }
 
   override async prepareCall(_provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
@@ -373,7 +374,7 @@ export class BridgeAdapter extends LlmAdapter {
       throw new LlmError('Copilot model catalog changed during preparation; retry the request', 'DISCOVERY_FAILED')
     }
     const bound: BoundCall = { model: definition, token, transport: this.transports[definition.protocol] }
-    return { model: resolvedInfo(definition), stream: options => this.run(options, bound) }
+    return { model: resolvedInfo(definition, this.deps.loadImage !== undefined), stream: options => this.run(options, bound) }
   }
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {

@@ -163,8 +163,9 @@ test('reasoning efforts are the advertised pi-ai levels only and omitted when no
   assert.equal(await efforts('grok-4.7'), undefined)
 })
 
-test('input modalities: image only for vision models, never pdf', async () => {
-  const { instance } = adapter()
+test('input modalities: image only for vision models with an image loader, never pdf', async () => {
+  assert.deepEqual((await adapter().instance.resolveModel('copilot-bridge', 'gemini-3-pro')).inputModalities, ['text'])
+  const { instance } = adapter({ loadImage: async () => ({ data: 'aGVsbG8=', mimeType: 'image/png' }) })
   assert.deepEqual((await instance.resolveModel('copilot-bridge', 'gemini-3-pro')).inputModalities, ['text', 'image'])
   assert.deepEqual((await instance.resolveModel('copilot-bridge', 'kimi-k3')).inputModalities, ['text'])
 })

@@ -11,6 +11,11 @@ import { modelsPayload } from './fixtures/copilot-models.ts'
 
 const settle = () => new Promise(resolve => setImmediate(resolve))
 const ids = (models: readonly { id: string }[]) => models.map(model => model.id)
+async function collect<T>(stream: AsyncIterable<T>): Promise<T[]> {
+  const result: T[] = []
+  for await (const item of stream) result.push(item)
+  return result
+}
 const supported = ['claude-sonnet-5', 'gpt-6', 'grok-4.7', 'mai-code-2', 'mai-code-2-flash', 'gemini-3-pro', 'kimi-k3']
 const account = (token = 'fixture-oauth', enterpriseHost?: string): CredentialRecord => ({
   kind: 'grant', payload: { type: 'github-oauth', token, ...enterpriseHost === undefined ? {} : { enterpriseHost } },
@@ -282,6 +287,62 @@ test('unload/reload disposes registration, routes, timers, pending discovery and
   h.editHidden([])
   assert.equal(h.updates.length - after, 1, 'reload must have exactly one volatile listener')
   await reloaded.dispose()
+})
+
+test('composed vision uses verified Harness attachment bytes, and never advertises images without the service', async t => {
+  const h = host(t)
+  await h.picker()
+  assert.deepEqual((await h.runtime.resolveModelInfo(BRIDGE_PROVIDER, 'gemini-3-pro')).inputModalities, ['text'])
+  const image = { attachmentId: 'fixture-image', mediaType: 'image/png' as const, bytes: 5, width: 1, height: 1 }
+  const read: unknown[] = []
+  const attachments = h.ctx.plugin({ apply(child: Context) {
+    child.provide('attachments', { async readImage(ref: unknown, signal?: AbortSignal) {
+      read.push(ref)
+      assert.equal(signal?.aborted, false)
+      return { ref: image, data: Buffer.from('hello') }
+    } })
+  } })
+  await settle()
+  assert.deepEqual((await h.runtime.resolveModelInfo(BRIDGE_PROVIDER, 'gemini-3-pro')).inputModalities, ['text', 'image'])
+  h.infer(async () => new Response([
+    { id: 'c1', object: 'chat.completion.chunk', created: 0, model: 'gemini-3-pro', choices: [{ index: 0, delta: { role: 'assistant', content: 'cat' }, finish_reason: null }] },
+    { id: 'c1', object: 'chat.completion.chunk', created: 0, model: 'gemini-3-pro', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+  ].map(event => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))
+  const chunks = await collect(h.runtime.stream({ provider: BRIDGE_PROVIDER, model: 'gemini-3-pro', messages: [
+    { role: 'user', content: [{ type: 'text', text: 'what?' }, { type: 'image', attachment: image }] },
+  ] } as Parameters<LlmRuntime['stream']>[0]))
+  assert.deepEqual(read, [image])
+  assert.ok(chunks.some(chunk => chunk.type === 'text-delta' && chunk.text === 'cat'))
+  const sent = h.requests.at(-1)!
+  assert.equal(new Headers(sent.init?.headers).get('copilot-vision-request'), 'true')
+  assert.match(String(sent.init?.body), /data:image\/png;base64,aGVsbG8=/)
+  await attachments.dispose()
+  assert.deepEqual((await h.runtime.resolveModelInfo(BRIDGE_PROVIDER, 'gemini-3-pro')).inputModalities, ['text'])
+})
+
+test('account reset cancels an already prepared call and active inference without sending to a new account', async t => {
+  const h = host(t)
+  await h.picker()
+  const prepared = await h.runtime.prepareCall({ provider: BRIDGE_PROVIDER, model: 'mai-code-2' })
+  h.setAccount(account('replacement-account'))
+  await h.picker()
+  const before = h.requests.length
+  const chunks = await collect(prepared.stream({ ...prepared.config, messages: [{ role: 'user', content: [{ type: 'text', text: 'private conversation' }] }] }))
+  assert.equal(h.requests.length, before, 'prepared call from the old account must not make a request')
+  assert.ok(chunks.some(chunk => chunk.type === 'finish' && chunk.reason.kind === 'aborted'))
+
+  const started = deferred<RequestInit | undefined>()
+  h.infer(async init => {
+    started.resolve(init)
+    return new Response(new ReadableStream({ start(controller) {
+      init?.signal?.addEventListener('abort', () => controller.error(init.signal?.reason), { once: true })
+    } }), { headers: { 'content-type': 'text/event-stream' } })
+  })
+  const active = collect(h.runtime.stream({ provider: BRIDGE_PROVIDER, model: 'mai-code-2', messages: [] }))
+  const sent = await started.promise
+  h.editHost('https://acme.ghe.com/')
+  assert.equal(sent?.signal?.aborted, true)
+  assert.ok((await active).some(chunk => chunk.type === 'finish' && chunk.reason.kind === 'aborted'))
 })
 
 test('management metadata uses the exchanged endpoint and every discovery/exchange/metadata request is attributed', async t => {

@@ -38,14 +38,15 @@ export function authRoutes(
   catalog?: LiveCatalog,
   metadata?: () => Promise<ReadonlyMap<string, CopilotMetadata>>,
   usage: () => Promise<CopilotUsage> = async () => ({ state: 'unavailable' }),
+  vision: () => boolean = () => true,
 ): ConnectionFetchRoute[] {
   return [
     { path: `${API_BASE}/usage`, methods: ['GET'], requestBody: 'buffered', fetch: route(() => usage()) },
     { path: `${API_BASE}/status`, methods: ['GET'], requestBody: 'buffered', fetch: route(() => auth.status()) },
-    { path: `${API_BASE}/models`, methods: ['GET'], requestBody: 'buffered', fetch: route(async () => modelCatalog(await auth.status(), catalog, metadata)) },
+    { path: `${API_BASE}/models`, methods: ['GET'], requestBody: 'buffered', fetch: route(async () => modelCatalog(await auth.status(), catalog, metadata, vision())) },
     { path: `${API_BASE}/models/refresh`, methods: ['POST'], requestBody: 'buffered', fetch: route(async () => {
       if ((await auth.status()).authenticated) await catalog?.refresh().catch(() => {})
-      return modelCatalog(await auth.status(), catalog, metadata)
+      return modelCatalog(await auth.status(), catalog, metadata, vision())
     }) },
     { path: `${API_BASE}/login`, methods: ['POST'], requestBody: 'buffered', fetch: route(() => auth.login()) },
     { path: `${API_BASE}/logout`, methods: ['POST'], requestBody: 'buffered', fetch: route(() => auth.logout()) },
