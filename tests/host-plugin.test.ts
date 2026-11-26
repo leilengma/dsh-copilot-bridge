@@ -51,6 +51,8 @@ function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean;
   t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     requests.push({ url, init })
+    if (url.endsWith('/login/device/code')) return Response.json({ device_code: 'fixture-device', user_code: 'ABCD-EFGH', verification_uri: 'https://github.com/login/device', interval: 1, expires_in: 900 })
+    if (url.endsWith('/login/oauth/access_token')) return Response.json({ access_token: 'fixture-completed-oauth' })
     if (url.endsWith('/copilot_internal/v2/token')) {
       exchanges++
       const host = new URL(url).hostname.slice(4)
@@ -67,9 +69,9 @@ function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean;
   } } })
   ctx.provide('credentials', {
     async readRecord(key: string) { assert.equal(key, BRIDGE_RECORD_KEY, 'bridge must never read native credentials'); return records.get(key) },
-    async modifyRecord(key: CredentialKey, update: (record: CredentialRecord | undefined) => CredentialRecord | undefined) {
+    async modifyRecord(key: CredentialKey, update: (record: CredentialRecord | undefined) => CredentialRecord | undefined | Promise<CredentialRecord | undefined>) {
       credentialWrites.push(key)
-      const value = update(records.get(key))
+      const value = await update(records.get(key))
       if (value) records.set(key, value)
       ctx.emit('credentials/record-updated', key)
       return value
@@ -360,6 +362,49 @@ test('management metadata uses the exchanged endpoint and every discovery/exchan
     for (const [key, value] of Object.entries(attributionHeaders())) assert.equal(new Headers(init?.headers).get(key), value)
     assert.equal(init?.redirect, 'error')
   }
+})
+
+test('completed device sign-in clears hidden config, discovers the live catalog and notifies the bridge picker', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const h = host(t, { signedOut: true, hidden: ['mai-code-2'] })
+  assert.deepEqual(await h.picker(), [])
+  assert.equal((await h.request('login', {})).envelope.value.state, 'pending')
+  const before = h.updates.length
+  t.mock.timers.tick(1000)
+  await settle()
+  assert.equal((await h.request('status')).envelope.value.state, 'authenticated')
+  assert.deepEqual(await h.picker(), supported)
+  assert.deepEqual(h.hiddenModels.get(), [])
+  assert.deepEqual(h.credentialWrites, [BRIDGE_RECORD_KEY])
+  assert.ok(h.updates.length > before)
+  assert.ok(h.updates.every(provider => provider === BRIDGE_PROVIDER))
+  assert.equal(h.exchanges, 1)
+})
+
+test('pending management metadata is cancelled and cannot cross sign-out or unload', async t => {
+  const h = host(t)
+  await h.picker()
+  let gate = deferred<Response>()
+  h.discover(() => gate.promise)
+  const oldView = h.request('models')
+  await settle()
+  const metadata = h.requests.at(-1)!
+  await h.request('logout', {})
+  assert.equal(metadata.init?.signal?.aborted, true)
+  gate.resolve(Response.json({ data: [{ id: 'mai-code-2', billing: { token_prices: { batch_size: 1000, default: { input_price: 999 } } } }] }))
+  assert.deepEqual((await oldView).envelope.value.models, [])
+  h.discover(async () => Response.json(modelsPayload))
+  h.setAccount(account('second-account'))
+  await h.picker()
+  gate = deferred<Response>()
+  h.discover(() => gate.promise)
+  const pending = h.request('models')
+  await settle()
+  const unloading = h.requests.at(-1)!
+  await h.plugin.dispose()
+  assert.equal(unloading.init?.signal?.aborted, true)
+  gate.resolve(Response.json(modelsPayload))
+  await pending
 })
 
 test('token refresh racing discovery publishes only the latest generation', async t => {

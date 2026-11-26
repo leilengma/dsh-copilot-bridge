@@ -85,7 +85,7 @@ function modelsUrl(token: string, enterprise: string | undefined): string {
 }
 
 /** Short-lived Copilot access token, held in host memory by the bridge. */
-export type CopilotAccessToken = Pick<AccessToken, 'token' | 'expiresAt'> & Partial<Pick<AccessToken, 'baseUrl'>>
+export type CopilotAccessToken = Pick<AccessToken, 'token' | 'expiresAt'> & Partial<Pick<AccessToken, 'baseUrl' | 'signal'>>
 
 /**
  * Reuse the bridge's access token; never exchange, persist or expose credentials here.
@@ -100,13 +100,13 @@ export function createCopilotMetadata(deps: {
 }): () => Promise<Metadata> {
   const now = deps.now ?? Date.now
   const fetch = deps.fetch ?? githubFetch
-  let cache: { token: string; url: string; expiresAt: number; value: Promise<Metadata> } | undefined
+  let cache: { token: string; url: string; signal: AbortSignal | undefined; expiresAt: number; value: Promise<Metadata> } | undefined
   return async () => {
     try {
       const account = await readBridgeAccount(deps.credentials())
       const access = account === undefined ? undefined : await deps.accessToken?.()
       const expires = number(access?.expiresAt)
-      if (account === undefined || typeof access?.token !== 'string' || !access.token || expires === undefined || expires <= now()) {
+      if (account === undefined || typeof access?.token !== 'string' || !access.token || access.signal?.aborted || expires === undefined || expires <= now()) {
         cache = undefined
         return new Map()
       }
@@ -114,8 +114,8 @@ export function createCopilotMetadata(deps: {
       const baseUrl = access.baseUrl === undefined ? undefined : allowedBaseUrl(access.baseUrl, account.enterpriseHost)
       if (access.baseUrl !== undefined && baseUrl === undefined) return new Map()
       const url = baseUrl === undefined ? modelsUrl(token, account.enterpriseHost) : `${baseUrl}/models`
-      if (cache?.token === token && cache.url === url && cache.expiresAt > now()) return cache.value
-      const entry = { token, url, expiresAt: Math.min(now() + 300_000, expires), value: Promise.resolve<Metadata>(new Map()) }
+      if (cache?.token === token && cache.url === url && cache.signal === access.signal && cache.expiresAt > now()) return cache.value
+      const entry = { token, url, signal: access.signal, expiresAt: Math.min(now() + 300_000, expires), value: Promise.resolve<Metadata>(new Map()) }
       cache = entry
       entry.value = (async () => {
         try {
@@ -126,10 +126,11 @@ export function createCopilotMetadata(deps: {
               'Editor-Plugin-Version': 'copilot-chat/0.35.0', 'Copilot-Integration-Id': 'vscode-chat',
               'X-GitHub-Api-Version': '2026-06-01', ...attributionHeaders(),
             },
-            redirect: 'error', signal: AbortSignal.timeout(5000),
+            redirect: 'error', signal: access.signal ? AbortSignal.any([access.signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000),
           })
           if (!response.ok) throw new Error('Copilot metadata unavailable')
           const result = parseCatalog(await response.json(), now())
+          if (access.signal?.aborted) return new Map()
           for (const model of result.values()) {
             if (model.promotion?.endsAt) entry.expiresAt = Math.min(entry.expiresAt, Date.parse(model.promotion.endsAt))
           }
