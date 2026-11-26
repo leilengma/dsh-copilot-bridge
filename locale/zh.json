@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "GitHub Copilot",
-    "description": "登录 GitHub Copilot 并管理可用模型，支持 GitHub Enterprise 账户。"
+    "description": "GitHub Copilot Bridge（copilot-bridge）：通过设备码登录并管理实时模型，支持 GitHub Enterprise。不会修改原生 github-copilot 提供方。"
   }
 }

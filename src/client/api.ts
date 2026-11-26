@@ -21,6 +21,7 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const api = {
   status: () => call<AuthStatus>('/status'),
   models: () => call<ModelCatalog>('/models'),
+  refreshModels: () => call<ModelCatalog>('/models/refresh', { method: 'POST' }),
   usage: () => call<CopilotUsage>('/usage'),
   login: () => call<AuthStatus>('/login', { method: 'POST' }),
   logout: () => call<AuthStatus>('/logout', { method: 'POST' }),

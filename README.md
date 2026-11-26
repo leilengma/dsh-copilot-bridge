@@ -1,10 +1,17 @@
 # dsh-copilot-bridge
 
-GitHub Copilot sign-in for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), on github.com **or a GitHub Enterprise host** such as `https://<company>.ghe.com/`.
+**GitHub Copilot Bridge** for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), on github.com **or a GitHub Enterprise host** such as `https://<company>.ghe.com/`.
 
-It provides a **GitHub Copilot** entry in the left sidebar with a full-page **Account / Models** view. The **Account** tab handles sign-in, with a **GitHub host** field: you enter your Enterprise URL, click **Save**, and the plugin writes it to the profile's configuration file.
+The plugin registers its own **`copilot-bridge`** provider with your account's live Copilot model catalog. It provides a **GitHub Copilot** sidebar entry with full-page **Account / Models** tabs for device-flow sign-in, account usage and model visibility. Supported live models become available without restarting Harness, signing in again or sending a preliminary chat request.
 
-The plugin handles sign-in, automatic provider setup and model visibility. It runs the OAuth device flow against the configured host and stores the long-lived credential in the Harness credential store under `llm-pi-ai` / `github-copilot`, together with `enterpriseUrl` when a host is set. The built-in `github-copilot` model route reads that record, refreshes short-lived Copilot tokens from `api.<host>`, and lists the models available to your account.
+The bridge stores its GitHub OAuth credential in its own Harness credential record, **`copilot-bridge/github`**. Short-lived Copilot access tokens and the discovered catalog stay in host memory; access tokens are refreshed automatically. The native **`github-copilot`** provider belongs to you: the bridge never creates, modifies, filters or deletes its profiles or credentials.
+
+## Upgrading from the native-provider bridge
+
+- **Sign in again** under **GitHub Copilot → Account** after upgrading. There is **no token import** from `llm-pi-ai/github-copilot`, environment variables or API-key/PAT fields; bridge sign-in uses the GitHub OAuth device flow only.
+- Select a model under **GitHub Copilot Bridge** (`copilot-bridge`) in the session's model picker. Existing sessions are not automatically moved to the new provider.
+- Sessions using **`github-copilot/*`** keep working only with **your own native provider profile and credential**. If that profile is unavailable, the picker shows **Select model**; choose a bridge model or configure the native provider yourself.
+- Existing native profiles and credentials are left untouched, including on bridge sign-out. The bridge no longer manages or supplies authentication to the native provider, which can use another account independently.
 
 ## Install
 
@@ -15,59 +22,52 @@ alias dsh="'/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bi
 dsh plugin --profile desktop add github:leilengma/dsh-copilot-bridge
 ```
 
-Restart the app.
+Restart the app to load the plugin and its client registrations.
 
 ## Use
 
-1. In the Harness sidebar, click **GitHub Copilot** and select the **Account** tab. This opens a full-page view alongside **Plugins**, not a narrow embedded settings section. You can also use **Plugins → Installed → GitHub Copilot → Open GitHub Copilot**. The sidebar, page header and installed plugin card use the supplied Copilot artwork (black in light mode, white in dark mode). After updating the plugin, restart Harness to reload package metadata and client registrations.
-2. If you use GitHub Enterprise, enter your Enterprise URL (for example `https://octocorp.ghe.com/`) under **GitHub host** and click **Save**. For a personal GitHub account, leave the default **github.com** host; **Use github.com** clears a previously saved Enterprise host. This section is shown only while signed out.
-3. On the **Account** tab, click **Sign in to GitHub Copilot**, open the device page (`https://<host>/login/device`), and enter the code shown. After sign-in, this tab shows your account usage and the **Models** tab becomes available.
-4. After saving the sign-in credential, the plugin checks Harness for `github-copilot` and creates its native provider profile if absent, leaving the API key blank. Existing provider settings are kept unchanged. It then refreshes the model catalog and notifies model pickers. If setup cannot complete (for example, settings are read-only), you stay signed in: the Account tab shows a warning and **Retry provider setup**, which retries without another OAuth flow. Alternatively, in **Settings → Models**, add or select `github-copilot`, leave its API key blank, and click **Apply**.
-5. Once provider setup completes, open **GitHub Copilot → Models** from the left sidebar. The **Models** tab appears only after sign-in; sign-out hides it and returns you to **Account**. The leftmost **eye** button controls whether a model appears in model selection: an open eye means visible; a crossed-out eye means hidden. Click again to restore it. Changes save immediately. Search matches model names and ids without changing the saved selection; counts always describe the full displayed catalog, with a shown count while searching.
+1. In the Harness sidebar, click **GitHub Copilot** and open **Account**. You can also use **Plugins → Installed → GitHub Copilot → Open GitHub Copilot**. The sidebar, page header and installed plugin card use the supplied Copilot artwork (black in light mode, white in dark mode).
+2. If you use GitHub Enterprise, enter your Enterprise URL (for example `https://octocorp.ghe.com/`) under **GitHub host** and click **Save**. For a personal GitHub account, leave **github.com** selected; **Use github.com** clears a saved Enterprise host. Host controls are shown only while signed out.
+3. Click **Sign in to GitHub Copilot**, open the device page (`https://<host>/login/device`) and enter the displayed code. The bridge saves its own OAuth credential and discovers the live catalog. No API key, native provider setup or preliminary chat request is needed. The **Account** tab shows usage and **Models** becomes available after sign-in.
+4. Open **GitHub Copilot → Models**. The leftmost **eye** button controls whether a supported model appears under **GitHub Copilot Bridge** in the picker: an open eye means visible; a crossed-out eye means hidden. Changes save immediately. Hidden rows stay in the management table, even when every supported model is hidden, so they can be restored.
+5. Click **Refresh** to discover the catalog again. Loading is shown inline. Discovery failures show an error and **Retry**; the last good rows and visibility choices are retained. The bridge has **no static catalog fallback**. A successfully discovered empty catalog is shown as empty, not as a loading or fallback list.
+6. Select a visible **GitHub Copilot Bridge** model in a new or existing session. Hiding a model removes it from the picker but does **not** prevent sessions already using it from continuing. Other providers with the same model id are unaffected.
 
-The Models table is usable immediately after provider setup, without sending a chat request. Until Harness records the account-specific model list, it uses the full configured provider catalog and labels that fallback; this does not assert account entitlement. Once discovered, the account catalog takes precedence, including an explicitly empty account catalog. Hidden models remain in the management table so they can be restored.
+Models that cannot be used remain visible as **disabled rows without an eye toggle**: **Unsupported protocol** means none of their advertised endpoints is supported; **Not offered for selection** means Copilot has disabled model selection for that model. They cannot be revealed. Non-chat models and models with no advertised endpoints are omitted. Supported endpoint selection is based on the live descriptor, preferring Anthropic Messages, then OpenAI Responses, then Chat Completions—not on model names.
 
-The Models table includes context size and input capabilities from Harness metadata, even for hidden models. It also reads Copilot's live catalog for **input/output/cache-read/cache-write credit prices per 1M tokens**, **discount badges** and **Retiring warnings** (hover for the provider's message). Long-context prices, when supplied, expand below the default prices. Prices use the provider's reported amounts without applying a promotional discount again. Expired promotions are omitted. These are informational only: eligibility and your eye-toggle settings are unchanged; retiring models are not automatically hidden.
+Search matches model names and ids without changing the saved visibility choices. Counts describe the full displayed catalog, with a shown count while searching. The table includes context size, input capabilities and provider-reported **input/output/cache-read/cache-write credit prices per 1M tokens**, **discount badges** and **Retiring warnings** when available. Expand a badge for its details or long-context prices below the default prices. Promotion discounts are not applied twice; expired promotions are omitted. Retiring models are not automatically hidden.
 
-Missing metadata is shown as **—**, never guessed or treated as zero. Live metadata requires a valid short-lived access token from the built-in Copilot route; make a Copilot request first if needed. Metadata failures do not block model management. There are no Add Models or Install Model Providers actions. The **Account** tab contains authentication and the Enterprise host; **Models** contains search, visibility and pricing. There is no separate GitHub Copilot Settings section.
+Missing metadata is shown as **—**, never guessed or treated as zero. Metadata comes from the live catalog; missing prices do not block model management. There are no Add Models or Install Model Providers actions. Authentication, status, sign-out and the Enterprise host live on **Account**, not in chat commands or a separate GitHub Copilot Settings section.
 
-Sign-in, status and sign-out are available on **GitHub Copilot → Account** from the left sidebar, not through chat commands.
-
-Signing out removes the credential but **retains the provider configuration**. Copilot models disappear from model pickers until you sign in again; other providers are unaffected. Credential changes refresh existing pickers without restarting Harness. Provider setup runs after completed sign-in or an explicit retry, never as a side effect of reading status. A concurrent settings edit causes setup to stop with a warning rather than overwrite that edit.
-
-To switch GitHub hosts, open **GitHub Copilot → Account** from the left sidebar, sign out, choose and save the new **GitHub host**, then sign in again. The host section is hidden while signed in.
+Signing out deletes only the bridge credential, drops its in-memory access tokens and catalog, and unsets `hiddenModels`. The bridge picker empties immediately; Enterprise host configuration is retained. The native `github-copilot` provider and other providers are unaffected. To switch GitHub hosts, sign out, save the new **GitHub host**, then sign in again.
 
 ### Account usage
 
-While signed in, the **Account** tab shows usage directly beneath **Signed in at …**: percentage used, progress and the provider's reset time. Hover or keyboard-focus the percentage for exact used / total credits (or requests on request-based plans). Unlimited and unavailable quotas are labelled rather than displayed as zero.
+While signed in, **Account** shows usage directly beneath **Signed in at …**: percentage used, progress and the provider's reset time. Hover or keyboard-focus the percentage for exact used / total credits (or requests on request-based plans). Unlimited and unavailable quotas are labelled rather than displayed as zero.
 
-Usage refreshes when Account opens or credentials change. The small **Refresh usage** icon fetches a fresh snapshot; there is no continuous polling. Unlike VS Code, Harness does not currently expose the per-response quota headers to plugins, so usage is not live-updated after every model request.
+Usage refreshes when Account opens or credentials change. The **Refresh usage** icon fetches a fresh snapshot; there is no continuous polling. Harness does not currently expose per-response quota headers to plugins, so usage is not live-updated after every model request.
 
-The authenticated `/api/copilot-bridge/usage` route reads `copilot_internal/user` host-side using the saved grant's issuer and OAuth credential, shared proxy transport, a 5-second timeout and no redirects. Concurrent reads for the same credential are coalesced, but results are not persistently cached. Only allowlisted display fields reach the browser; credential changes invalidate in-flight results. Usage errors do not prevent signing out or changing settings.
+The authenticated `/api/copilot-bridge/usage` route reads `copilot_internal/user` host-side using the bridge's saved issuer and OAuth credential, shared proxy transport, a 5-second timeout and no redirects. Concurrent reads for the same credential are coalesced, but results are not persistently cached. Only allowlisted display fields reach the browser; credential changes invalidate in-flight results. Usage errors do not prevent signing out or changing settings.
 
 ## Configuration
 
-**Save** writes the value to the profile's own patch file, `~/.dsh/profiles/<profile>/cordis.patch.yml`:
+**Save** writes values to the profile's own patch file, `~/.dsh/profiles/<profile>/cordis.patch.yml`:
 
 ```yaml
 - id: copilot-bridge
   config:
     enterpriseUrl: https://octocorp.ghe.com/
     hiddenModels:
-      - gpt-4o
+      - mai-code-2
 ```
 
 You can also edit that file by hand. A blank `enterpriseUrl` or `github.com` means github.com. The host field accepts a full URL or a bare host, and only the hostname is used.
 
-`hiddenModels` defaults to an empty list and matches **exact, case-sensitive model ids** (not names or patterns). Hand edits take effect live through the Loader's volatile-config notification. Once the full account catalog is known, unknown or removed ids are pruned from the saved list. Removing the last hidden id unsets the key. Without a known catalog, the list is kept until the provider discovers models. If settings are unavailable or pruning cannot be saved, valid hidden ids still apply and status/sign-out remain usable; failed pruning writes are logged and retried on the next reconciliation.
+`hiddenModels` applies **only to `copilot-bridge`** and matches **exact, case-sensitive model ids**, not names or patterns. Hand edits take effect live through the Loader's volatile-config notification. Unknown ids are kept while the catalog is unknown; discovery failures do not prune visibility choices. Removing the last hidden id unsets the key. Visibility controls are read-only when the settings service or profile entry is unavailable; search still works.
 
-The bridge re-applies credential filtering after every provider refresh. Its full-list bookkeeping is stored alongside the filtered catalog in the credential record, so a restart preserves hidden models and still lets you restore them.
+Every sign-out and completed sign-in **unsets `hiddenModels`**, regardless of account identity; choices are not remembered per account. A reset write failure is logged without failing authentication/sign-out. Hidden ids are plugin configuration—not filtering or bookkeeping in a native credential record. Catalog snapshots are memory-only and rediscovered after restart when signed in.
 
-Harness 0.2.2-rc.5 advertises a static pi-ai catalog without reading the grant or its allowed ids—even after sign-out. For that version, the bridge also installs a lifetime-scoped compatibility wrapper on the LLM service's model listing: it advertises no `github-copilot` models without a saved sign-in credential, then applies the configured hidden ids when signed in. It checks sign-in again after discovery to discard responses that were in flight during sign-out, and notifies cached pickers on credential changes, mount, edits, and unload. Other providers and model execution are unchanged; unloading the bridge removes its filter. This wrapper can be removed once Harness exposes an equivalent public catalog-filter hook.
-
-Every sign-out and completed sign-in **unsets `hiddenModels`**, regardless of account identity; visibility choices are not remembered per account. A reset write failure is logged without failing authentication/sign-out.
-
-Hiding the model a session is using is allowed: its next request fails with `UNKNOWN_MODEL` and its picker shows **Select model**. Hiding every model removes the `github-copilot` group from the picker. Visibility controls are read-only when the settings service or profile entry is unavailable; search still works.
+Hiding every supported model removes the bridge group from the picker while leaving the full management table restorable. Existing sessions can still resolve supported hidden models. The bridge never wraps or filters the native provider's model listing.
 
 ## Development
 
@@ -76,18 +76,17 @@ Requires Node 24 or newer.
 ```sh
 npm ci
 npm run check        # tsc --noEmit, esbuild bundle to lib/, node --test (type-stripped .ts)
+git diff --check
 ```
 
-- `src/host/`: Host plugin. Device flow, auth controller, credential grant, model-selection compatibility filter, `/api/copilot-bridge/*` routes and config writes.
-- `src/client/`: full-page sidebar Account/Models view and an installed-plugin shortcut, including device-code sign-in and sign-out confirmation on Account.
-- Authenticated `GET /api/copilot-bridge/models` returns the full account model list plus display-only metadata, including hidden models; it never includes credential payloads or uses the filtered picker list.
-- `src/host/copilot-metadata.ts` reuses the built-in route's access token for a host-only `/models` request. It never exchanges tokens or writes credentials. Requests use the shared proxy-aware transport, a 5-second timeout and no redirects. A single-flight, token/host-scoped in-memory cache lasts up to 5 minutes (bounded by token/promotion expiry); transport failures are retried on a later read after at most 30 seconds. Only allowlisted billing/warning fields for ids in the displayed management catalog reach the client. Copilot API fields follow [the official catalog schema](https://github.com/microsoft/vscode/blob/main/extensions/copilot/src/platform/endpoint/common/endpointProvider.ts) and [VS Code's badge semantics](https://github.com/microsoft/vscode/blob/main/src/vs/workbench/contrib/chat/browser/widget/input/modelPicker/modelPickerBadges.ts).
-- `src/host/provider-setup.ts`: uses the provider directory's settings namespace/path and a redacted effective snapshot; creates only the absent profile with a revision-checked path write. No API key, endpoint, or model defaults are copied over existing settings.
-- `src/shared/contract.ts`: request and response types shared by the Host and the client. `AuthStatus.providerSetup` reports optional `pending` / `ready` / `warning` setup progress separately from authentication; the client keeps polling while setup is pending.
+- `src/host/`: device flow, bridge-owned credentials, in-memory access-token lifecycle, live discovery, the dedicated LLM adapter, authenticated `/api/copilot-bridge/*` routes and config writes.
+- `src/client/`: sidebar Account/Models view and installed-plugin shortcut, localized device-code sign-in, bridge ownership/migration guidance, refresh/retry, disabled rows and immediate-save visibility controls.
+- `src/shared/contract.ts`: safe request/response types shared by the host and client. `GET /api/copilot-bridge/models` and `POST /api/copilot-bridge/models/refresh` return management rows, including hidden and disabled models, plus `state: loading | ready | error` and an optional last error. They never expose credential payloads or raw Copilot responses.
+- Discovery feeds the bridge picker, resolution and per-model transport selection from one snapshot. Transports use the public `@earendil-works/pi-ai` exports; the Harness-facing route remains `copilot-bridge`.
 
-`lib/` is committed so that `github:` installs work without a build step. Run `npm run build` before you commit.
+`lib/` is committed so that `github:` installs work without a build step. Run `npm run build` before committing.
 
-For the installed desktop integration (no network, real credentials, or profile changes), build first and run:
+For deterministic installed desktop integration, build first and run:
 
 ```sh
 ELECTRON_RUN_AS_NODE=1 '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness' \
@@ -95,7 +94,7 @@ ELECTRON_RUN_AS_NODE=1 '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSe
   '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules'
 ```
 
-This checks the installed pi-ai adapter and LLM service, including removal of a hidden model from the advertised picker catalog and restoration on bridge unload, creation of an absent provider, read-only failure/retry, preservation of the provider on repeated sign-in and sign-out, removal of models and picker invalidation on logout, model restoration on a new sign-in, and management-catalog availability for a fresh grant before any chat request. Provider settings and credentials are in-memory fixtures; no desktop profile is changed.
+Installed checks use in-memory fixtures, not desktop credentials or profiles. Deterministic tests and installed-runtime checks do not replace browser acceptance or authorize live inference; any live smoke test requires separate approval.
 
 To test a local checkout without touching your desktop profile:
 

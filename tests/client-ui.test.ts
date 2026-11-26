@@ -6,6 +6,8 @@ import { buildSync } from 'esbuild'
 import type { CopilotPluginTabs } from '../src/client/plugin-page.tsx'
 import type { UsageDisplay } from '../src/client/account-usage.tsx'
 import type { ModelsTable } from '../src/client/hidden-models-card.tsx'
+import type { ModelsDisplay } from '../src/client/models-page.tsx'
+import type { api } from '../src/client/api.ts'
 
 type TableProps = Parameters<typeof ModelsTable>[0]
 
@@ -16,6 +18,9 @@ const compiled = buildSync({
     import { renderToStaticMarkup } from 'react-dom/server'
     import { CopilotPluginTabs } from './src/client/plugin-page.tsx'
     import { ModelsTable } from './src/client/hidden-models-card.tsx'
+    import { ModelsDisplay } from './src/client/models-page.tsx'
+    export { api } from './src/client/api.ts'
+    export { DICTIONARIES as dictionaries } from './src/client/i18n.ts'
     import { UsageDisplay } from './src/client/account-usage.tsx'
     import { apply, inject } from './src/client/index.tsx'
     export const injections = inject
@@ -24,9 +29,11 @@ const compiled = buildSync({
     const slots = []
     const selectedPanels = []
     const remoteListeners = new Map()
+    const localeSnapshot = { active: 'en', revision: 0 }
+    export const setLocale = active => { localeSnapshot.active = active; localeSnapshot.revision++ }
     apply({
       layout: { selectPanel: id => selectedPanels.push(id) },
-      locale: { register: () => () => {}, getSnapshot: () => ({ active: 'en', revision: 0 }), subscribe: () => () => {} },
+      locale: { register: () => () => {}, getSnapshot: () => localeSnapshot, subscribe: () => () => {} },
       effect: f => f(), on: event => { commandHooks.push(event); return () => {} }, remote: { $on: (event, listener) => { remoteListeners.set(event, listener); return () => remoteListeners.delete(event) } },
       commandUi: { decorate: decoration => { commandHooks.push(decoration.name); return () => {} } }, sessions: {},
       slots: { inject: (_name, f) => f(), register: (slot, component) => { slots.push({slot, component}); return () => {} } },
@@ -41,6 +48,7 @@ const compiled = buildSync({
     export const renderTabs = props => renderToStaticMarkup(createElement(CopilotPluginTabs, props))
     export const renderUsage = props => renderToStaticMarkup(createElement(UsageDisplay, props))
     export const renderTable = props => renderToStaticMarkup(createElement(ModelsTable, props))
+    export const renderModels = props => renderToStaticMarkup(createElement(ModelsDisplay, props))
     export const getRevision = authRevision.getSnapshot
     export const subscribeToRevision = authRevision.subscribe
     export const emitRemote = (event, key) => remoteListeners.get(event)?.(key)
@@ -67,6 +75,10 @@ const ui = bundled.exports as {
   emitRemote: (event: string, key: string) => void
   renderTabs: (props: Parameters<typeof CopilotPluginTabs>[0]) => string
   renderTable: (props: TableProps) => string
+  renderModels: (props: Parameters<typeof ModelsDisplay>[0]) => string
+  api: typeof api
+  dictionaries: Readonly<Record<'en' | 'zh', Readonly<Record<string, string>>>>
+  setLocale: (locale: 'en' | 'zh') => void
   renderUsage: (props: Parameters<typeof UsageDisplay>[0]) => string
 }
 
@@ -151,6 +163,104 @@ test('Account owns sign-in and host controls; Models is absent until authenticat
   assert.doesNotMatch(models, /aria-label="Account usage"/)
 })
 
+test('Account explains bridge ownership and upgrade sign-in in both locales without attaching to the native provider card', () => {
+  assert.equal(ui.registrations.some(slot => slot.name === 'settings.models.provider-card'), false)
+  for (const [locale, expected] of [
+    ['en', [/GitHub Copilot Bridge \(copilot-bridge\)/, /native github-copilot provider, profiles and credentials are left untouched/, /sign in again using the device flow/, /tokens are not imported/, /github-copilot\/\* require your own native provider profile/]],
+    ['zh', [/GitHub Copilot Bridge（copilot-bridge）/, /不会修改原生 github-copilot 提供方、配置档或凭据/, /通过设备码流程重新登录/, /不会导入现有 token/, /github-copilot\/\* 的会话需要你自己的原生提供方配置档/]],
+  ] as const) {
+    ui.setLocale(locale)
+    try {
+      const html = ui.renderTabs({ status, tab: 'account', onTabChange: () => {}, onStatusChange: () => {} })
+      for (const pattern of expected) assert.match(html, pattern)
+      assert.doesNotMatch(html, /Retry provider setup|首次请求 github-copilot|leave the API key|API 密钥留空/)
+    } finally { ui.setLocale('en') }
+  }
+})
+
+test('Models offers manual refresh and shows catalog loading and retryable errors without dropping the last good rows', () => {
+  const catalog = { status, models: [...props.models, { id: 'disabled', name: 'Disabled model', disabledReason: 'not-offered' as const }], state: 'ready' as const }
+  const display = { catalog, loading: false, busy: false, onSave: props.onSave, onRefresh: () => {} }
+  const ready = ui.renderModels(display)
+  assert.match(ready, /<button[^>]*>Refresh<\/button>/)
+  assert.match(ready, /Claude Haiku 4.5/)
+  assert.match(ready, /Disabled model/)
+  assert.match(ready, /Not offered for selection/)
+  const loading = ui.renderModels({ ...display, catalog: { ...catalog, state: 'loading' } })
+  assert.match(loading, /aria-busy="true"/)
+  assert.match(loading, /role="status"[^>]*>Loading models/)
+  const refreshing = ui.renderModels({ ...display, loading: true })
+  assert.match(refreshing, /<button[^>]*disabled=""[^>]*>Refresh<\/button>/)
+  assert.match(loading, /Claude Haiku 4.5/)
+  for (const html of [
+    ui.renderModels({ ...display, catalog: { ...catalog, state: 'error', error: 'Discovery unavailable' } }),
+    ui.renderModels({ ...display, loadError: 'Discovery unavailable' }),
+  ]) {
+    assert.match(html, /role="alert"/)
+    assert.match(html, /Discovery unavailable/)
+    assert.match(html, /<button[^>]*>Retry<\/button>/)
+    assert.match(html, /Claude Haiku 4.5/)
+    assert.match(html, /Disabled model/)
+  }
+  const empty = ui.renderModels({ ...display, catalog: { ...catalog, models: [] } })
+  assert.match(empty, /No models are available to this account/)
+  assert.doesNotMatch(empty, /Loading models|github-copilot provider|configured provider catalog/)
+})
+
+test('a failed catalog read remains retryable even when the previous snapshot was still loading', () => {
+  const html = ui.renderModels({
+    catalog: { status, models: props.models, state: 'loading' },
+    loading: false, busy: false, loadError: 'Connection interrupted', onSave: props.onSave, onRefresh: () => {},
+  })
+  assert.match(html, /Connection interrupted/)
+  assert.match(html, /Claude Haiku 4.5/)
+  assert.match(html, /<button[^>]*>Retry<\/button>/)
+  assert.doesNotMatch(html, /<button[^>]*disabled=""[^>]*>(?:Refresh|Retry)<\/button>/)
+})
+
+test('both locales translate every key and render model discovery states and disabled reasons', () => {
+  const keys = Object.keys(ui.dictionaries.en).sort()
+  assert.deepEqual(Object.keys(ui.dictionaries.zh).sort(), keys)
+  for (const key of keys) {
+    for (const locale of ['en', 'zh'] as const) assert.ok(ui.dictionaries[locale][key]?.trim(), `${locale}.${key}`)
+    const placeholders = (value: string) => value.match(/\{[^}]+\}/g)?.sort() ?? []
+    assert.deepEqual(placeholders(ui.dictionaries.en[key]!), placeholders(ui.dictionaries.zh[key]!), key)
+  }
+  for (const [locale, expected] of [
+    ['en', { refresh: '>Refresh</button>', loading: 'Loading models…', retry: '>Retry</button>', error: 'Could not refresh models. Try again.', unsupported: 'Unsupported protocol', notOffered: 'Not offered for selection' }],
+    ['zh', { refresh: '>刷新</button>', loading: '正在加载模型…', retry: '>重试</button>', error: '无法刷新模型，请重试。', unsupported: '不支持的协议', notOffered: '不可供选择' }],
+  ] as const) {
+    ui.setLocale(locale)
+    try {
+      const display = { catalog: { status, state: 'error' as const, models: [
+        { id: 'unsupported', name: 'Unsupported', disabledReason: 'unsupported-protocol' as const },
+        { id: 'not-offered', name: 'Not offered', disabledReason: 'not-offered' as const },
+      ] }, loading: false, busy: false, onSave: props.onSave, onRefresh: () => {} }
+      const html = ui.renderModels(display)
+      for (const label of [expected.refresh, expected.retry, expected.error, expected.unsupported, expected.notOffered]) assert.ok(html.includes(label), label)
+      assert.doesNotMatch(html, /aria-pressed=/)
+      assert.ok(ui.renderModels({ ...display, loading: true }).includes(expected.loading))
+    } finally { ui.setLocale('en') }
+  }
+})
+
+test('manual catalog refresh posts to the authenticated route and a failed refresh can be retried', async t => {
+  const catalog = { status, models: props.models, state: 'ready' }
+  const calls: { url: string; method: string | undefined; cache: RequestCache | undefined }[] = []
+  let fail = true
+  t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+    calls.push({ url, method: init.method, cache: init.cache })
+    return Response.json(fail ? { ok: false, error: 'Discovery unavailable' } : { ok: true, value: catalog }, { status: fail ? 503 : 200 })
+  })
+  await assert.rejects(ui.api.refreshModels(), /Discovery unavailable/)
+  fail = false
+  assert.deepEqual(await ui.api.refreshModels(), catalog)
+  assert.deepEqual(calls, [
+    { url: '/api/copilot-bridge/models/refresh', method: 'POST', cache: 'no-store' },
+    { url: '/api/copilot-bridge/models/refresh', method: 'POST', cache: 'no-store' },
+  ])
+})
+
 test('model table exposes accessible eye toggles, search and real metadata without invented costs', () => {
   const html = ui.renderTable(props)
   assert.match(html, /type="search"/)
@@ -160,6 +270,20 @@ test('model table exposes accessible eye toggles, search and real metadata witho
   assert.match(html, /1M/)
   assert.match(html, />Vision</)
   assert.doesNotMatch(html, />Tools<|\$|Add models|Install model providers/)
+})
+
+test('disabled catalog models show their reason without offering a visibility toggle', () => {
+  const html = ui.renderTable({ ...props, models: [
+    props.models[0]!,
+    { id: 'unsupported', name: 'Unsupported model', disabledReason: 'unsupported-protocol' },
+    { id: 'not-offered', name: 'Unavailable model', protocol: 'openai-responses', disabledReason: 'not-offered' },
+  ] })
+  assert.match(html, /Unsupported model/)
+  assert.match(html, /Unsupported protocol/)
+  assert.match(html, /Unavailable model/)
+  assert.match(html, /Not offered for selection/)
+  assert.doesNotMatch(html, /aria-label="(?:Hide|Show) (?:Unsupported|Unavailable) model"/)
+  assert.equal((html.match(/aria-pressed=/g) ?? []).length, 1)
 })
 
 test('model table shows provider credit prices, discount and Retiring text without disabling visibility', () => {
@@ -206,6 +330,15 @@ test('bridge record updates notify model-page subscribers but other records do n
     assert.equal(ui.getRevision(), before + 1)
     assert.equal(notifications, 1)
   } finally { unsubscribe() }
+})
+
+test('bridge catalog updates refresh Models subscribers when background discovery completes', () => {
+  const before = ui.getRevision()
+  ui.emitRemote('llm/models-updated', 'github-copilot')
+  ui.emitRemote('llm/models-updated', 'another-provider')
+  assert.equal(ui.getRevision(), before)
+  ui.emitRemote('llm/models-updated', 'copilot-bridge')
+  assert.equal(ui.getRevision(), before + 1)
 })
 
 test('credential reference changes still refresh Account subscribers without chat integration', () => {

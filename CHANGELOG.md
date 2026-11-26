@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- Dedicated **GitHub Copilot Bridge** provider (`copilot-bridge`) with an account-specific live catalog, per-model protocol selection and bridge-owned sign-in credentials. Short-lived access tokens and catalog snapshots stay in host memory.
+- Models **Refresh** action, loading and retryable error states that retain the last good rows, and disabled rows with localized **Unsupported protocol** / **Not offered for selection** reasons instead of eye toggles. No static catalog fallback.
+
+### Changed
+
+- **Upgrade: sign in again** under **GitHub Copilot → Account** using the device flow. There is **no token import** from the native provider, environment variables or API-key/PAT fields.
+- Select models from **GitHub Copilot Bridge** (`copilot-bridge`). Existing sessions on **`github-copilot/*`** require the user's own native provider profile and credential; otherwise the picker shows **Select model**. Sessions are not migrated automatically.
+- The native **`github-copilot`** provider, profiles and credentials are **left untouched**. The bridge no longer creates native profiles, supplies native authentication, filters the native picker or attaches guidance to the native provider card.
+- Hidden-model choices apply only to `copilot-bridge`. Hidden rows stay restorable and supported hidden models continue to resolve for existing sessions. Bridge sign-out clears only its credential, in-memory tokens/catalog and hidden-model choices; Enterprise host configuration and native credentials/profiles are retained.
+
 ## 1.0.0
 
 ### Added
