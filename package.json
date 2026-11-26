@@ -1,7 +1,7 @@
 {
   "name": "dsh-copilot-bridge",
   "description": "GitHub Copilot sign-in for DeepSeek Harness, including GitHub Enterprise hosts (e.g. <company>.ghe.com), for its built-in github-copilot route",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "license": "MIT",
   "icon": "assets/github-copilot.svg",
   "type": "module",
