@@ -32,7 +32,7 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean; hidden?: string[]; pinned?: string[] } = {}) {
+function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean; hidden?: string[]; pinned?: string[]; readOnly?: boolean; failSettings?: boolean } = {}) {
   const ctx = new Context()
   const enterpriseUrl = createVolatile('')
   const hiddenModels = createVolatile(options.hidden ?? [])
@@ -87,15 +87,17 @@ function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean;
     Object.defineProperty(self, Context.filter, { value: (owner: Context) => owner.fiber === entry.fiber })
     entry.emit(self, 'loader/volatile-update', [[field]])
   }
-  ctx.provide('settings', {
+  if (!options.readOnly) ctx.provide('settings', {
     configure() { return () => {} },
     async update(_id: string, patch: { hiddenModels?: string[]; pinnedModels?: string[]; enterpriseUrl?: string }) {
+      if (options.failSettings) throw new Error('fixture settings unavailable')
       settingWrites.push(patch)
       if (patch.hiddenModels) { updateVolatile(hiddenModels, createVolatile(patch.hiddenModels)); emitEdit('hiddenModels') }
       if (patch.pinnedModels) { updateVolatile(pinnedModels, createVolatile(patch.pinnedModels)); emitEdit('pinnedModels') }
       if (patch.enterpriseUrl !== undefined) { updateVolatile(enterpriseUrl, createVolatile(patch.enterpriseUrl)); emitEdit('enterpriseUrl') }
     },
     async mutate(_id: string, operations: { path: string[] }[]) {
+      if (options.failSettings) throw new Error('fixture settings unavailable')
       settingWrites.push(operations)
       for (const { path } of operations) {
         if (path[0] === 'hiddenModels') updateVolatile(hiddenModels, createVolatile([]))
@@ -128,17 +130,19 @@ function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean;
     pollAuthorization(next: typeof pollAuthorization) { pollAuthorization = next },
     discover(next: typeof discovery) { discovery = next }, infer(next: typeof inference) { inference = next },
     editHidden(next: string[]) { updateVolatile(hiddenModels, createVolatile(next)); emitEdit('hiddenModels') },
+    editPinned(next: string[]) { updateVolatile(pinnedModels, createVolatile(next)); emitEdit('pinnedModels') },
     editHost(next: string) { updateVolatile(enterpriseUrl, createVolatile(next)); emitEdit('enterpriseUrl') },
     setAccount(next: CredentialRecord | undefined) {
       if (next) records.set(BRIDGE_RECORD_KEY, next)
       else records.delete(BRIDGE_RECORD_KEY)
       ctx.emit('credentials/record-updated', credentialKey('copilot-bridge', 'github'))
     },
-    async request(path: string, body?: unknown) {
+    async request(path: string, body?: unknown, raw = false) {
       const route = routes.get(`/api/copilot-bridge/${path}`)
       assert.ok(route, `missing route ${path}`)
+      assert.ok(route.methods?.includes(body === undefined ? 'GET' : 'POST'))
       const response = await route.fetch(new Request(`https://localhost/api/copilot-bridge/${path}`, {
-        method: body === undefined ? 'GET' : 'POST', ...body === undefined ? {} : { body: JSON.stringify(body) },
+        method: body === undefined ? 'GET' : 'POST', ...body === undefined ? {} : { body: raw ? String(body) : JSON.stringify(body) },
       }))
       return { status: response.status, envelope: await response.json() }
     },
@@ -220,6 +224,8 @@ test('pin route persists exact supported ids, deduplicates, rejects invalid inpu
     assert.equal(invalid.envelope.ok, false)
     assert.equal(typeof invalid.envelope.error, 'string')
   }
+  assert.equal((await h.request('pinned-models', '{', true)).status, 400)
+  assert.equal((await h.request('pinned-models', '', true)).status, 400)
   assert.equal(h.settingWrites.length, writes, 'invalid pin requests cannot mutate settings')
   assert.deepEqual((await h.request('status')).envelope.value.pinnedModels, ['mai-code-2', 'gpt-6'])
   const cleared = await h.request('pinned-models', { pinnedModels: [] })
@@ -227,6 +233,26 @@ test('pin route persists exact supported ids, deduplicates, rejects invalid inpu
   assert.deepEqual(cleared.envelope.value.pinnedModels, [])
   assert.deepEqual(h.settingWrites.at(-1), [{ op: 'unset', path: ['pinnedModels'] }])
 })
+
+for (const mode of ['read-only', 'write-failure'] as const) {
+  test(`pin route reports ${mode} settings without claiming a save or changing the picker`, async t => {
+    const h = host(t, { pinned: ['mai-code-2'], hidden: ['gpt-6'], readOnly: mode === 'read-only', failSettings: mode === 'write-failure' })
+    const before = await h.picker()
+    const updates = h.updates.length
+    for (const pinnedModels of [['gpt-6'], []]) {
+      const failed = await h.request('pinned-models', { pinnedModels })
+      assert.equal(failed.status, 500)
+      assert.equal(failed.envelope.ok, false)
+    }
+    const status = (await h.request('status')).envelope.value
+    assert.equal(status.configWritable, mode !== 'read-only')
+    assert.deepEqual(status.pinnedModels, ['mai-code-2'])
+    assert.deepEqual(status.hiddenModels, ['gpt-6'])
+    assert.deepEqual(await h.picker(), before)
+    assert.deepEqual(h.settingWrites, [])
+    assert.equal(h.updates.length, updates)
+  })
+}
 
 test('pins stably lead bridge picker and management rows without revealing hidden pins or changing resolution or native models', async t => {
   const h = host(t, { hidden: ['mai-code-2'] })
@@ -250,6 +276,17 @@ test('pins stably lead bridge picker and management rows without revealing hidde
   assert.deepEqual(await h.picker(), ['gpt-6', 'mai-code-2', 'kimi-k3', 'claude-sonnet-5', 'grok-4.7', 'mai-code-2-flash', 'gemini-3-pro'])
   await h.request('pinned-models', { pinnedModels: [] })
   assert.deepEqual(await h.picker(), supported)
+})
+
+test('catalog refresh retains pin preference but uses the new catalog-relative order within both groups', async t => {
+  const h = host(t, { pinned: ['gpt-6', 'mai-code-2', 'kimi-k3'] })
+  assert.deepEqual(await h.picker(), ['gpt-6', 'mai-code-2', 'kimi-k3', 'claude-sonnet-5', 'grok-4.7', 'mai-code-2-flash', 'gemini-3-pro'])
+  h.discover(async () => Response.json({ data: [...modelsPayload.data].reverse() }))
+  const refreshed = (await h.request('models/refresh', {})).envelope.value
+  assert.deepEqual(ids(refreshed.models), ['kimi-k3', 'mai-code-2', 'gpt-6', 'future-realtime', 'gemini-3-pro', 'mai-code-2-flash', 'grok-4.7', 'gpt-5.4-nano', 'claude-opus-5', 'claude-sonnet-5'])
+  assert.deepEqual(await h.picker(), ['kimi-k3', 'mai-code-2', 'gpt-6', 'gemini-3-pro', 'mai-code-2-flash', 'grok-4.7', 'claude-sonnet-5'])
+  await h.request('pinned-models', { pinnedModels: [] })
+  assert.deepEqual(await h.picker(), ['kimi-k3', 'gemini-3-pro', 'mai-code-2-flash', 'mai-code-2', 'grok-4.7', 'gpt-6', 'claude-sonnet-5'])
 })
 
 test('discovery failures and catalog changes preserve saved pins while only supported live ids can be newly pinned', async t => {
@@ -371,6 +408,39 @@ test('host switch gates a preserved account, clears pins, discards old discovery
   h.setAccount(account('enterprise-account', 'acme.ghe.com'))
   assert.deepEqual(await h.picker(), supported)
   assert.ok(h.requests.some(request => request.url === 'https://copilot-api.acme.ghe.com/models'))
+})
+
+test('external volatile pins update only the bridge and unload/reload leaves exactly one live listener', async t => {
+  const h = host(t)
+  await h.picker()
+  const before = h.updates.length
+  h.editPinned(['kimi-k3', 'mai-code-2'])
+  assert.deepEqual(h.updates.slice(before), [BRIDGE_PROVIDER])
+  assert.deepEqual(await h.picker(), ['mai-code-2', 'kimi-k3', 'claude-sonnet-5', 'gpt-6', 'grok-4.7', 'mai-code-2-flash', 'gemini-3-pro'])
+  await h.plugin.dispose()
+  const unloaded = h.updates.length
+  h.editPinned(['mai-code-2-flash'])
+  assert.equal(h.updates.length, unloaded)
+  const reloaded = h.mount()
+  assert.deepEqual(await h.picker(), ['mai-code-2-flash', 'claude-sonnet-5', 'gpt-6', 'grok-4.7', 'mai-code-2', 'gemini-3-pro', 'kimi-k3'])
+  const after = h.updates.length
+  h.editPinned([])
+  assert.deepEqual(h.updates.slice(after), [BRIDGE_PROVIDER])
+  assert.deepEqual(await h.picker(), supported)
+  assert.deepEqual(ids(await h.runtime.listModels('github-copilot')), ['mai-code-2'])
+  await reloaded.dispose()
+})
+
+test('enterprise URL route clears saved pins alongside hidden ids without deleting the native or bridge account', async t => {
+  const h = host(t, { pinned: ['mai-code-2'], hidden: ['mai-code-2'] })
+  await h.picker()
+  const changed = await h.request('enterprise-url', { enterpriseUrl: 'acme.ghe.com' })
+  assert.equal(changed.status, 200)
+  assert.deepEqual(changed.envelope.value.pinnedModels, [])
+  assert.deepEqual(h.pinnedModels.get(), [])
+  assert.deepEqual(h.hiddenModels.get(), [])
+  assert.deepEqual(await h.picker(), [])
+  assert.deepEqual(h.credentialWrites, [])
 })
 
 test('unload/reload disposes registration, routes, timers, pending discovery and listeners', async t => {
