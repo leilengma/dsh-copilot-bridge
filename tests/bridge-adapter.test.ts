@@ -341,7 +341,7 @@ test('adaptive default requests retain abort, 401 refresh and injected transport
     throw new Error('injected transport')
   }
   const overriding = adapter({ catalog, transports: { 'anthropic-messages': custom } }).instance
-  await assert.rejects(collect(overriding.stream(request('claude-opus-5.5'))), /injected transport/)
+  await assert.rejects(collect(overriding.stream(request('claude-opus-5.5'))), { code: 'PI_AI_ERROR' })
   assert.ok(injected)
 })
 
@@ -450,6 +450,32 @@ test('vision requests send the image and the Copilot vision header', async () =>
 })
 
 // --- errors, cancellation, auth refresh ---------------------------------------------------
+test('provider errors never expose echoed access tokens but retain safe status and classification', async () => {
+  const secret = 'tok-1'
+  for (const model of ['mai-code-2', 'claude-sonnet-5', 'gemini-3-pro']) {
+    const http = fakeFetch(httpError(400, `context length exceeded; Authorization: Bearer ${secret}`))
+    const { instance } = adapter({ fetch: http.fetch })
+    const chunks = await collect(instance.stream(request(model)))
+    const reason = finishOf(chunks)
+    assert.equal(reason.kind === 'error' && reason.failure.code, 'CONTEXT_WINDOW_EXCEEDED')
+    assert.equal(reason.kind === 'error' && reason.failure.status, 400)
+    assert.equal(JSON.stringify(chunks).includes(secret), false, model)
+    assert.equal(JSON.stringify(chunks).includes('Authorization'), false, model)
+  }
+})
+
+test('a throwing transport cannot expose request secrets in a propagated error or its cause', async () => {
+  const transport: BridgeTransport = async function* () { throw new Error('network failure Bearer tok-1') }
+  const { instance } = adapter({ transports: { 'anthropic-messages': transport } })
+  await assert.rejects(collect(instance.stream(request('claude-sonnet-5'))), error => {
+    assert.ok(error instanceof Error)
+    assert.equal(error.message.includes('tok-1'), false)
+    assert.equal(error.cause, undefined)
+    assert.equal((error as Error & { code: string }).code, 'TRANSPORT')
+    return true
+  })
+})
+
 test('a provider error before the stream is a terminal error finish', async () => {
   const http = fakeFetch(httpError(400, 'bad request'))
   const { instance } = adapter({ fetch: http.fetch })

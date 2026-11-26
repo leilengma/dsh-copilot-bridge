@@ -174,12 +174,23 @@ function mapUsage(usage: Usage): TokenUsage {
   }
 }
 
-/** Classify a pi-ai terminal error; the HTTP status (when observed) wins over message text. */
+/** Only owned diagnostics cross the boundary; raw provider text is classification evidence, never output. */
 function failureOf(message: string, status: number | undefined, aborted: boolean): LlmFailure {
   const code = aborted ? 'ABORTED' : classify(message, status)
   const leading = /^\D{0,40}?\b([45]\d\d)\b/.exec(message)
   const httpStatus = status !== undefined && status >= 400 ? status : leading ? Number(leading[1]) : undefined
-  return { message: message || 'Copilot request failed', code, ...httpStatus === undefined ? {} : { status: httpStatus } }
+  const diagnostics: Readonly<Record<string, string>> = {
+    ABORTED: 'Copilot request aborted',
+    AUTH: 'Copilot authentication failed; sign in again',
+    CONTEXT_WINDOW_EXCEEDED: 'Copilot model context window exceeded',
+    QUOTA: 'Copilot quota exceeded',
+    RATE_LIMIT: 'Copilot rate limit exceeded; retry later',
+    INVALID_REQUEST: 'Copilot rejected the request',
+    SERVER: 'Copilot service failed; retry later',
+    TIMEOUT: 'Copilot request timed out',
+    TRANSPORT: 'Copilot connection failed',
+  }
+  return { message: diagnostics[code] ?? 'Copilot request failed', code, ...httpStatus === undefined ? {} : { status: httpStatus } }
 }
 
 function classify(message: string, status: number | undefined): string {
@@ -478,8 +489,8 @@ export class BridgeAdapter extends LlmAdapter {
           if (event.type === 'done' || event.type === 'error') return
         }
       } catch (error) {
-        if (options.signal?.aborted) throw new LlmError('Copilot request aborted by caller', 'ABORTED', { cause: error })
-        throw error
+        const failure = failureOf(error instanceof Error ? error.message : '', status, options.signal?.aborted === true)
+        throw LlmError.fromFailure(failure)
       } finally {
         consumer.abort()
       }
