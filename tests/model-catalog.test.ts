@@ -4,7 +4,7 @@ import type { AuthStatus } from '../src/shared/contract.ts'
 import { modelCatalog } from '../src/host/model-catalog.ts'
 
 const status: AuthStatus = {
-  authenticated: true, state: 'authenticated', provider: 'github-copilot',
+  authenticated: true, state: 'authenticated', provider: 'copilot-bridge',
   githubHost: 'github.com', enterpriseUrl: '', configWritable: true,
   availableModels: ['hidden', 'unknown', 'visible'], hiddenModels: ['hidden'],
 }
