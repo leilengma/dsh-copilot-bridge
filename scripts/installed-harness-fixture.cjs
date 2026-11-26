@@ -130,13 +130,18 @@ async function createHarnessFixture() {
     ctx.provide('settings', {
       configure: () => () => {},
       async update(id, patch) {
-        assert.deepEqual(Object.keys(patch), ['hiddenModels'])
+        const keys = Object.keys(patch)
+        assert.equal(keys.length, 1, 'one preference per settings update')
+        assert.ok(keys[0] === 'hiddenModels' || keys[0] === 'pinnedModels', 'only bridge model preferences may be updated')
         await updateConfig(id, { ...loader.resolve(id).options.config, ...patch })
       },
       async mutate(id, ops) {
-        assert.deepEqual(ops, [{ op: 'unset', path: ['hiddenModels'] }])
+        assert.equal(ops.length, 1)
+        const key = ops[0].path[0]
+        assert.ok(key === 'hiddenModels' || key === 'pinnedModels', 'only bridge model preferences may be unset')
+        assert.deepEqual(ops, [{ op: 'unset', path: [key] }])
         const config = { ...loader.resolve(id).options.config }
-        delete config.hiddenModels
+        delete config[key]
         await updateConfig(id, config)
       },
     })

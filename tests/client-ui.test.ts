@@ -87,7 +87,7 @@ const status: TableProps['status'] = {
   enterpriseUrl: '', configWritable: true, availableModels: ['haiku', 'gpt'], hiddenModels: ['gpt'],
 }
 const props: TableProps = {
-  status, busy: false, onSave: async () => {}, models: [
+  status, busy: false, onSave: async () => {}, onSavePins: async () => {}, models: [
     { id: 'haiku', name: 'Claude Haiku 4.5', contextWindow: 200_000, inputModalities: ['text', 'image'] },
     { id: 'gpt', name: 'GPT', contextWindow: 1_000_000 },
   ],
@@ -180,7 +180,7 @@ test('Account explains bridge ownership and upgrade sign-in in both locales with
 
 test('Models offers manual refresh and shows catalog loading and retryable errors without dropping the last good rows', () => {
   const catalog = { status, models: [...props.models, { id: 'disabled', name: 'Disabled model', disabledReason: 'not-offered' as const }], state: 'ready' as const }
-  const display = { catalog, loading: false, busy: false, onSave: props.onSave, onRefresh: () => {} }
+  const display = { catalog, loading: false, busy: false, onSave: props.onSave, onSavePins: props.onSavePins, onRefresh: () => {} }
   const ready = ui.renderModels(display)
   assert.match(ready, /<button[^>]*>Refresh<\/button>/)
   assert.match(ready, /Claude Haiku 4.5/)
@@ -210,7 +210,7 @@ test('Models offers manual refresh and shows catalog loading and retryable error
 test('a failed catalog read remains retryable even when the previous snapshot was still loading', () => {
   const html = ui.renderModels({
     catalog: { status, models: props.models, state: 'loading' },
-    loading: false, busy: false, loadError: 'Connection interrupted', onSave: props.onSave, onRefresh: () => {},
+    loading: false, busy: false, loadError: 'Connection interrupted', onSave: props.onSave, onSavePins: props.onSavePins, onRefresh: () => {},
   })
   assert.match(html, /Connection interrupted/)
   assert.match(html, /Claude Haiku 4.5/)
@@ -235,7 +235,7 @@ test('both locales translate every key and render model discovery states and dis
       const display = { catalog: { status, state: 'error' as const, models: [
         { id: 'unsupported', name: 'Unsupported', disabledReason: 'unsupported-protocol' as const },
         { id: 'not-offered', name: 'Not offered', disabledReason: 'not-offered' as const },
-      ] }, loading: false, busy: false, onSave: props.onSave, onRefresh: () => {} }
+      ] }, loading: false, busy: false, onSave: props.onSave, onSavePins: props.onSavePins, onRefresh: () => {} }
       const html = ui.renderModels(display)
       for (const label of [expected.refresh, expected.retry, expected.error, expected.unsupported, expected.notOffered]) assert.ok(html.includes(label), label)
       assert.doesNotMatch(html, /aria-pressed=/)
@@ -261,6 +261,39 @@ test('manual catalog refresh posts to the authenticated route and a failed refre
   ])
 })
 
+test('pin saves post exact IDs to the authenticated route, consume confirmed status and allow retry after failure', async t => {
+  const calls: { url: string; init: RequestInit }[] = []
+  let fail = true
+  t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+    calls.push({ url, init })
+    const pinnedModels = (JSON.parse(init.body as string) as { pinnedModels: string[] }).pinnedModels
+    return Response.json(fail ? { ok: false, error: 'Could not save pins' } : { ok: true, value: { ...status, pinnedModels } }, { status: fail ? 503 : 200 })
+  })
+  await assert.rejects(ui.api.setPinnedModels(['gpt']), /Could not save pins/)
+  fail = false
+  assert.deepEqual(await ui.api.setPinnedModels(['gpt']), { ...status, pinnedModels: ['gpt'] })
+  assert.deepEqual(await ui.api.setPinnedModels([]), { ...status, pinnedModels: [] })
+  assert.deepEqual(calls.map(call => ({ url: call.url, method: call.init.method, cache: call.init.cache, headers: call.init.headers, body: call.init.body })), [
+    { url: '/api/copilot-bridge/pinned-models', method: 'POST', cache: 'no-store', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: '{"pinnedModels":["gpt"]}' },
+    { url: '/api/copilot-bridge/pinned-models', method: 'POST', cache: 'no-store', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: '{"pinnedModels":["gpt"]}' },
+    { url: '/api/copilot-bridge/pinned-models', method: 'POST', cache: 'no-store', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: '{"pinnedModels":[]}' },
+  ])
+})
+
+test('pin failures stay inline in both locales while preserving the confirmed pin and hidden states for retry', () => {
+  for (const [locale, label] of [['en', 'Unpin model GPT'], ['zh', '取消置顶模型 GPT']] as const) {
+    ui.setLocale(locale)
+    try {
+      const html = ui.renderModels({ catalog: { status: { ...status, pinnedModels: ['gpt'] }, models: props.models, state: 'ready' },
+        loading: false, busy: false, saveError: 'Could not save pins', onRefresh: () => {}, onSave: props.onSave, onSavePins: props.onSavePins })
+      assert.match(html, /role="alert"[^>]*>Could not save pins<\/p>/)
+      assert.ok(html.includes(`aria-label="${label}" title="${label}" aria-pressed="true"`))
+      assert.doesNotMatch(html, /disabled=""/)
+      assert.match(html, /aria-label="(?:Show|显示) GPT"[^>]*aria-pressed="false"/)
+    } finally { ui.setLocale('en') }
+  }
+})
+
 test('model table exposes accessible eye toggles, search and real metadata without invented costs', () => {
   const html = ui.renderTable(props)
   assert.match(html, /type="search"/)
@@ -270,6 +303,42 @@ test('model table exposes accessible eye toggles, search and real metadata witho
   assert.match(html, /1M/)
   assert.match(html, />Vision</)
   assert.doesNotMatch(html, />Tools<|\$|Add models|Install model providers/)
+})
+
+test('pin actions sit immediately beside the eye with reference-shaped outline glyphs and localized state', () => {
+  for (const [locale, pin, unpin, hide] of [
+    ['en', 'Pin model Claude Haiku 4.5', 'Unpin model GPT', 'Hide Claude Haiku 4.5'],
+    ['zh', '置顶模型 Claude Haiku 4.5', '取消置顶模型 GPT', '隐藏 Claude Haiku 4.5'],
+  ] as const) {
+    ui.setLocale(locale)
+    try {
+      const html = ui.renderTable({ ...props, status: { ...status, pinnedModels: ['gpt'] } })
+      const cells = [...html.matchAll(/<td[^>]*>(.*?)<\/td>/g)].map(match => match[1]!)
+      const actions = cells.find(cell => cell.includes(`aria-label="${pin}"`))!
+      assert.ok(actions, 'pin must share the visibility action cell')
+      assert.match(actions, new RegExp(`aria-label="${hide}"[\\s\\S]*</button><button[^>]*aria-label="${pin}"`))
+      assert.match(actions, /display:inline-flex;gap:4px;flex-wrap:nowrap/)
+      assert.ok(actions.includes(`aria-label="${pin}" title="${pin}" aria-pressed="false"`))
+      const pinned = cells.find(cell => cell.includes(`aria-label="${unpin}"`))!
+      assert.ok(pinned.includes(`aria-label="${unpin}" title="${unpin}" aria-pressed="true"`))
+      const glyph = (cell: string) => [...cell.matchAll(/<svg[^>]*>[\s\S]*?<\/svg>/g)].at(-1)![0]
+      assert.match(glyph(actions), /width="18" height="18"[^>]*fill="none" stroke="currentColor"/)
+      assert.match(glyph(actions), /d="M2 12h7/)
+      assert.match(glyph(pinned), /d="m3 21 6-6/)
+      assert.notEqual(glyph(actions), glyph(pinned), 'Pin is horizontal; Unpin is diagonal')
+      assert.doesNotMatch(glyph(actions) + glyph(pinned), /<image|data:image/)
+      assert.ok(html.indexOf('>GPT</span>') < html.indexOf('>Claude Haiku 4.5</span>'), 'hidden pins remain first without being revealed')
+      assert.match(html, /aria-label="(?:Show|显示) GPT"[^>]*aria-pressed="false"/)
+    } finally { ui.setLocale('en') }
+  }
+})
+
+test('management ordering is pinned-first and stable within both groups even when pins are saved in reverse order', () => {
+  const html = ui.renderTable({ ...props, status: { ...status, pinnedModels: ['d', 'b', 'unknown'] }, models: [
+    { id: 'a', name: 'Alpha' }, { id: 'b', name: 'Beta' }, { id: 'c', name: 'Gamma' }, { id: 'd', name: 'Delta' },
+  ] })
+  const names = [...html.matchAll(/>(Alpha|Beta|Gamma|Delta)<\/span>/g)].map(match => match[1])
+  assert.deepEqual(names, ['Beta', 'Delta', 'Alpha', 'Gamma'])
 })
 
 test('disabled catalog models show their reason without offering a visibility toggle', () => {
@@ -283,7 +352,8 @@ test('disabled catalog models show their reason without offering a visibility to
   assert.match(html, /Unavailable model/)
   assert.match(html, /Not offered for selection/)
   assert.doesNotMatch(html, /aria-label="(?:Hide|Show) (?:Unsupported|Unavailable) model"/)
-  assert.equal((html.match(/aria-pressed=/g) ?? []).length, 1)
+  assert.doesNotMatch(html, /aria-label="(?:Pin|Unpin) (?:Unsupported|Unavailable) model"/)
+  assert.equal((html.match(/aria-pressed=/g) ?? []).length, 2)
 })
 
 test('model table shows provider credit prices, discount and Retiring text without disabling visibility', () => {
@@ -347,9 +417,9 @@ test('credential reference changes still refresh Account subscribers without cha
   assert.equal(ui.getRevision(), before + 1)
 })
 
-test('busy and read-only model tables disable every visibility mutation', () => {
+test('busy and read-only model tables disable visibility and pin mutations', () => {
   for (const html of [ui.renderTable({ ...props, busy: true }), ui.renderTable({ ...props, status: { ...status, configWritable: false } })]) {
-    assert.equal((html.match(/<button[^>]*disabled=""/g) ?? []).length, 2)
+    assert.equal((html.match(/<button[^>]*disabled=""/g) ?? []).length, 4)
     assert.match(html, /type="search"/)
   }
 })
