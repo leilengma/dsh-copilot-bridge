@@ -41,8 +41,8 @@ export interface ProviderCardProps {
 /** `@deepseek-ai/dsh-client-ui-renderer`: the UI slot registry. */
 export interface SlotRegistry {
   register(slot: SlotBase & { readonly name: 'conversation.input.overlay' }, component: ComponentType): Dispose
-  register(slot: SlotBase & { readonly name: 'settings.section'; readonly label: () => string }, component: ComponentType): Dispose
-  register(slot: { readonly name: 'settings.section.icon'; readonly id: string }, component: ComponentType<{ size?: number }>): Dispose
+  /** Plugins page list item: summary on its card, page when the card is opened. */
+  register(slot: SlotBase & { readonly name: 'plugins.item'; readonly label: () => string }, component: ComponentType<{ readonly view: 'summary' | 'page' }>): Dispose
   /** Keyed slot: one entry per `key` and `priority`; a second entry at an occupied cell throws. */
   register(slot: {
     readonly name: 'settings.models.provider-card'
@@ -93,7 +93,7 @@ export interface SessionsRuntime {
 
 /** `@deepseek-ai/dsh-api-remotes`: Host events forwarded to the browser. */
 export interface ClientRemote {
-  $on(event: 'credentials/reference-updated', listener: (ref: string) => void): Dispose
+  $on(event: 'credentials/reference-updated' | 'credentials/record-updated', listener: (ref: string) => void): Dispose
 }
 
 /** Command result as the `command/executed` event delivers it. */

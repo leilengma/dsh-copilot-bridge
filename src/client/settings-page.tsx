@@ -2,8 +2,10 @@ import { useEffect, useState } from 'react'
 import { Button, Input, RiskConfirmation, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { AuthStatus } from '../shared/contract.ts'
 import { api, errorMessage } from './api.ts'
+import { AccountUsage } from './account-usage.tsx'
 import { DeviceCodeField, StateLabel } from './components.tsx'
 import { text, useLocaleRevision } from './i18n.ts'
+import { authRevision } from './store.ts'
 import { css } from './styles.ts'
 
 declare const __PLUGIN_VERSION__: string
@@ -69,10 +71,13 @@ function EnterpriseUrlCard({ status, busy, onSave }: {
   )
 }
 
-/** The GitHub Copilot section of the Settings page. */
-export function CopilotSettings() {
+/** Account tab: parent-owned authentication status also gates the Models tab. */
+export function CopilotAccount({ status, onStatusChange, active }: {
+  readonly status: AuthStatus | undefined
+  readonly onStatusChange: (status: AuthStatus) => void
+  readonly active: boolean
+}) {
   useLocaleRevision()
-  const [status, setStatus] = useState<AuthStatus>()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
   const [copied, setCopied] = useState(false)
@@ -84,7 +89,7 @@ export function CopilotSettings() {
     setBusy(true)
     setError(undefined)
     try {
-      setStatus(await action())
+      onStatusChange(await action())
       return true
     } catch (cause) {
       setError(errorMessage(cause))
@@ -95,22 +100,16 @@ export function CopilotSettings() {
   }
 
   const refresh = async () => {
+    const revision = authRevision.getSnapshot()
     try {
-      setStatus(await api.status())
+      const value = await api.status()
+      if (revision !== authRevision.getSnapshot()) return
+      onStatusChange(value)
       setError(undefined)
     } catch (cause) {
-      setError(errorMessage(cause))
+      if (revision === authRevision.getSnapshot()) setError(errorMessage(cause))
     }
   }
-
-  useEffect(() => {
-    let alive = true
-    api.status().then(
-      value => { if (alive) setStatus(value) },
-      (cause: unknown) => { if (alive) setError(errorMessage(cause)) },
-    )
-    return () => { alive = false }
-  }, [])
 
   useEffect(() => {
     if (status?.state !== 'pending') return
@@ -131,10 +130,9 @@ export function CopilotSettings() {
   const authenticated = status?.authenticated === true
   return (
     <section style={css.section}>
-      <h2 style={css.title}>{text('title')}</h2>
       <p style={css.intro}>{text('intro')}</p>
 
-      <EnterpriseUrlCard status={status} busy={busy} onSave={value => act(() => api.setEnterpriseUrl(value))} />
+      {!authenticated ? <EnterpriseUrlCard status={status} busy={busy} onSave={value => act(() => api.setEnterpriseUrl(value))} /> : null}
 
       <div style={css.card}>
         <div style={css.row}>
@@ -147,7 +145,7 @@ export function CopilotSettings() {
                 </Button>
               )
               : (
-                <Button variant="primary" disabled={busy || pending} onClick={() => { void act(api.login) }}>
+                <Button variant="primary" disabled={busy || pending || status === undefined} onClick={() => { void act(api.login) }}>
                   {busy ? text('requesting') : pending ? text('waiting') : text('signIn')}
                 </Button>
               )}
@@ -170,9 +168,7 @@ export function CopilotSettings() {
           ? (
             <>
               <p style={css.body}>{text('signedInAt', { host: status.signedInHost ?? status.githubHost })}</p>
-              {status.modelCount === undefined
-                ? null
-                : <p style={{ ...css.body, fontWeight: 500 }}>{text('models', { count: status.modelCount })}</p>}
+              {active ? <AccountUsage issuer={status.signedInHost ?? status.githubHost} /> : null}
               <p style={css.hint}>{text('whereToSelect', { provider: status.provider })}</p>
             </>
           )

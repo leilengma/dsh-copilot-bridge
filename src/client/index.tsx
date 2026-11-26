@@ -1,12 +1,13 @@
 /**
- * dsh-copilot-bridge Web client: the Settings section (sign-in plus the GitHub
- * Enterprise URL editor), the `/copilot-login` device-code dialog, and the
+ * dsh-copilot-bridge Web client: the Plugins Account/Models tabs,
+ * the `/copilot-login` device-code dialog, and the
  * `/copilot-logout` confirmation.
  */
 import type { ClientContext } from './harness.ts'
-import { CopilotNavIcon, LoginDialog } from './components.tsx'
+import { PI_AI_RECORD_KEY } from '../shared/contract.ts'
+import { LoginDialog } from './components.tsx'
 import { DICTIONARIES, LOCALE_NS, bindLocale, text } from './i18n.ts'
-import { CopilotSettings } from './settings-page.tsx'
+import { CopilotPluginEntry } from './plugin-page.tsx'
 import { CopilotProviderCardNotice } from './provider-card.tsx'
 import { bumpAuthRevision, closeLoginDialogWhenAuthenticated, showLoginResult } from './store.ts'
 
@@ -29,6 +30,15 @@ export function apply(ctx: ClientContext): void {
       void closeLoginDialogWhenAuthenticated()
     }),
     `${SECTION_ID}: close login dialog after credential commit`,
+  )
+
+  // Discovery and visibility edits update the grant record without necessarily
+  // changing its credential reference. Refresh an already-open Models page too.
+  ctx.effect(
+    () => ctx.remote.$on('credentials/record-updated', ref => {
+      if (ref === PI_AI_RECORD_KEY) bumpAuthRevision()
+    }),
+    `${SECTION_ID}: refresh discovered models`,
   )
 
   ctx.effect(() => ctx.commandUi.decorate({
@@ -65,18 +75,13 @@ export function apply(ctx: ClientContext): void {
     locale: LOCALE_NS,
   }, LoginDialog))
 
-  ctx.slots.inject('settings.section', () => ctx.slots.register({
-    name: 'settings.section',
-    id: SECTION_ID,
-    order: 11,
+  ctx.slots.inject('plugins.item', () => ctx.slots.register({
+    name: 'plugins.item',
+    id: `${SECTION_ID}-models`,
+    order: 20,
     locale: LOCALE_NS,
     label: () => text('nav'),
-  }, CopilotSettings))
-
-  ctx.slots.inject('settings.section.icon', () => ctx.slots.register({
-    name: 'settings.section.icon',
-    id: SECTION_ID,
-  }, CopilotNavIcon))
+  }, CopilotPluginEntry))
 
   // Models page: tell the user the github-copilot card needs no API key. The
   // slot is keyed by adapter namespace, so the entry receives every pi-ai

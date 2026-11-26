@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Show authenticated account credit usage below **Signed in at …**, with a progress bar, provider reset time, exact used/total on hover or keyboard focus, and a manual refresh icon. Refresh on opening Account and credential changes without polling; keep OAuth credentials and raw quota responses on the host. Remove the duplicate Account-tab title and hide GitHub host configuration while signed in.
+
+- Consolidate GitHub Copilot under **Plugins → GitHub Copilot** with **Account** and **Models** tabs. Move authentication and Enterprise host configuration out of Settings; show Models only while signed in, and return to Account on sign-out. Update sign-in guidance in English and Chinese.
+
+- Enrich the Plugins model table with live Copilot credit prices (including long-context tiers), active discount badges and informational **Retiring** warnings. Read metadata host-side using the route-owned access token, with bounded caching, proxy support and fail-open missing data; model eligibility and visibility are unchanged.
+
+- Move model visibility from Settings into **Plugins → GitHub Copilot**: searchable model table with immediate-save eye toggles, context size and available input capabilities. Preserve hidden rows for restoration and show unavailable costs/metadata as **—**. Settings retains authentication and Enterprise host configuration.
+
+- Fix hidden Copilot models remaining visible in Harness 0.2.2-rc.5's static picker catalog: filter the advertised LLM listing as well as the grant, invalidate cached selectors on changes, and restore the service method on bridge unload. Add a regression check using the installed Harness adapter and LLM service.
+
+- Model visibility in **Settings → GitHub Copilot**: hide raw model ids with immediate-save checkboxes, a scrollable list, case-insensitive search, whole-account counts, and English/Chinese copy.
+- Profile-level `hiddenModels` configuration with live hand edits, exact-id matching, automatic pruning, and re-filtering after Copilot token refreshes. The full catalog is retained in credential bookkeeping across restarts.
+- Hidden choices reset on every sign-out and completed sign-in. `/copilot-status` reports the hidden count. Hiding an active model or every model is allowed, with a warning in Settings.
+
 ## 0.1.0
 
 First release.

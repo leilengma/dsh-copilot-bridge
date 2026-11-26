@@ -43,6 +43,60 @@ export interface AuthStatus {
   readonly message?: string
   /** Models the Harness route recorded as available to this account. */
   readonly modelCount?: number
+  /** Full, unfiltered account catalog, sorted; absent until recorded by pi-ai. */
+  readonly availableModels?: readonly string[]
+  /** Saved hidden ids, after pruning; only present when authenticated. */
+  readonly hiddenModels?: readonly string[]
+}
+
+/** Provider-reported AI credits per 1M tokens; absent fields are unknown (not zero). */
+export interface ModelPrices {
+  readonly input?: number
+  readonly output?: number
+  readonly cacheRead?: number
+  readonly cacheWrite?: number
+}
+
+export interface ModelPromotion {
+  readonly discountPercent: number
+  readonly message?: string
+  readonly endsAt?: string
+}
+
+/** Display-only metadata; missing values are unknown, never inferred capabilities or prices. */
+export interface CopilotModel {
+  readonly id: string
+  readonly name: string
+  readonly contextWindow?: number
+  readonly inputModalities?: readonly ('text' | 'image' | 'audio' | 'video')[]
+  readonly pricing?: ModelPrices
+  readonly longContextPricing?: ModelPrices
+  readonly defaultContextMax?: number
+  readonly promotion?: ModelPromotion
+  /** Provider warning text; the badge always says Retiring, never Retired. */
+  readonly retiring?: string
+}
+
+/** Full account catalog for management, including models excluded from the picker. */
+export interface ModelCatalog {
+  readonly status: AuthStatus
+  readonly models: readonly CopilotModel[]
+}
+
+/** Display-only account quota, never an OAuth token or raw user-info payload. */
+export type CopilotUsage = { readonly state: 'signed-out' | 'unavailable' } | {
+  readonly state: 'available'
+  readonly unit: 'credits' | 'requests'
+  readonly unlimited: boolean
+  readonly percentUsed?: number
+  readonly used?: number
+  readonly total?: number
+  readonly reset?: { readonly at: string; readonly hasTime: boolean }
+}
+
+/** Body of `POST /hidden-models`. An empty array removes the config key. */
+export interface HiddenModelsRequest {
+  readonly hiddenModels: readonly string[]
 }
 
 /** Body of `POST /enterprise-url`. An empty string resets to github.com. */
