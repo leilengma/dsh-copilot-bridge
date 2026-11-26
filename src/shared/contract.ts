@@ -8,10 +8,16 @@
 /** Literal `/api` prefix of the Host routes; registered on the authenticated shared channel. */
 export const API_BASE = '/api/copilot-bridge'
 
-/** Credential record the Harness `github-copilot` route reads (scope/id). */
-export const PI_AI_RECORD_SCOPE = 'llm-pi-ai'
+/** Harness route this plugin registers and owns. */
+export const BRIDGE_PROVIDER = 'copilot-bridge'
+
+/** Credential record holding the bridge's GitHub OAuth token (scope/id). */
+export const BRIDGE_RECORD_SCOPE = 'copilot-bridge'
+export const BRIDGE_RECORD_ID = 'github'
+export const BRIDGE_RECORD_KEY = `${BRIDGE_RECORD_SCOPE}/${BRIDGE_RECORD_ID}`
+
+/** Native pi-ai route; still wrapped until the bridge adapter replaces it. */
 export const PI_AI_PROVIDER = 'github-copilot'
-export const PI_AI_RECORD_KEY = `${PI_AI_RECORD_SCOPE}/${PI_AI_PROVIDER}`
 
 /** The public GitHub host, used when no enterprise host is configured. */
 export const GITHUB_DOTCOM = 'github.com'
@@ -23,16 +29,14 @@ export type FlowState = 'signed-out' | 'pending' | 'authenticated' | 'expired' |
 export interface AuthStatus {
   readonly authenticated: boolean
   readonly state: FlowState
-  /** Harness provider the credential is published to. */
-  readonly provider: typeof PI_AI_PROVIDER
+  /** Harness route the bridge serves. */
+  readonly provider: typeof BRIDGE_PROVIDER
   /** Host sign-in targets now: the configured enterprise host, or github.com. */
   readonly githubHost: string
   /** Enterprise URL saved in the profile's configuration; empty when github.com is used. */
   readonly enterpriseUrl: string
   /** Whether the Host can write `enterpriseUrl` into the profile's configuration file. */
   readonly configWritable: boolean
-  /** Post-sign-in provider configuration; absent until this session attempts setup. */
-  readonly providerSetup?: 'pending' | 'ready' | 'warning'
   /** Host the stored credential was issued by, when it differs from `githubHost`. */
   readonly signedInHost?: string
   /** Pending device flow: page to open. */
@@ -43,12 +47,10 @@ export interface AuthStatus {
   readonly expiresAt?: number
   /** Terminal flow message (expired / denied / error). */
   readonly message?: string
-  /** Size of the full management catalog (account-discovered, or provider fallback). */
+  /** Size of the full management catalog. */
   readonly modelCount?: number
   /** Full, unfiltered management catalog, sorted; absent when no catalog is available. */
   readonly availableModels?: readonly string[]
-  /** Static provider fallback, not yet verified against this account's entitlements. */
-  readonly modelCatalogSource?: 'provider'
   /** Saved hidden ids, after pruning; only present when authenticated. */
   readonly hiddenModels?: readonly string[]
 }
@@ -67,10 +69,23 @@ export interface ModelPromotion {
   readonly endsAt?: string
 }
 
+/** Wire protocol a catalog model is served over. */
+export type ModelProtocol = 'anthropic-messages' | 'openai-responses' | 'openai-completions'
+
+/** Why a listed model cannot be selected or revealed. */
+export type ModelDisabledReason = 'unsupported-protocol' | 'not-offered'
+
+/** Live catalog discovery progress. */
+export type CatalogState = 'loading' | 'ready' | 'error'
+
 /** Display-only metadata; missing values are unknown, never inferred capabilities or prices. */
 export interface CopilotModel {
   readonly id: string
   readonly name: string
+  /** Protocol chosen from the live `supported_endpoints`; absent when disabled. */
+  readonly protocol?: ModelProtocol
+  /** Present on rows shown disabled: never in the picker and never revealable. */
+  readonly disabledReason?: ModelDisabledReason
   readonly contextWindow?: number
   readonly inputModalities?: readonly ('text' | 'image' | 'audio' | 'video')[]
   readonly pricing?: ModelPrices
@@ -85,6 +100,9 @@ export interface CopilotModel {
 export interface ModelCatalog {
   readonly status: AuthStatus
   readonly models: readonly CopilotModel[]
+  readonly state: CatalogState
+  /** Last discovery error; `models` still holds the last good snapshot. */
+  readonly error?: string
 }
 
 /** Display-only account quota, never an OAuth token or raw user-info payload. */
