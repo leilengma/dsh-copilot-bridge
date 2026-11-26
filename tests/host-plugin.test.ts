@@ -45,14 +45,16 @@ function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean;
   const settingWrites: unknown[] = []
   const updates: string[] = []
   const requests: { url: string; init: RequestInit | undefined }[] = []
+  let authorize: (init?: RequestInit) => Promise<Response> = async () => Response.json({ device_code: 'fixture-device', user_code: 'ABCD-EFGH', verification_uri: 'https://github.com/login/device', interval: 1, expires_in: 900 })
+  let pollAuthorization: (init?: RequestInit) => Promise<Response> = async () => Response.json({ access_token: 'fixture-completed-oauth' })
   let discovery: (init?: RequestInit) => Promise<Response> = async () => Response.json(modelsPayload)
   let inference: (init?: RequestInit) => Promise<Response> = async () => { throw new Error('unexpected inference') }
   let exchanges = 0
   t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     requests.push({ url, init })
-    if (url.endsWith('/login/device/code')) return Response.json({ device_code: 'fixture-device', user_code: 'ABCD-EFGH', verification_uri: 'https://github.com/login/device', interval: 1, expires_in: 900 })
-    if (url.endsWith('/login/oauth/access_token')) return Response.json({ access_token: 'fixture-completed-oauth' })
+    if (url.endsWith('/login/device/code')) return authorize(init)
+    if (url.endsWith('/login/oauth/access_token')) return pollAuthorization(init)
     if (url.endsWith('/copilot_internal/v2/token')) {
       exchanges++
       const host = new URL(url).hostname.slice(4)
@@ -119,6 +121,8 @@ function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean;
   return {
     ctx, plugin, mount, mountLlm, nativeList, records, updates, requests, credentialWrites, settingWrites, hiddenModels,
     get runtime() { return runtime }, get exchanges() { return exchanges },
+    authorize(next: typeof authorize) { authorize = next },
+    pollAuthorization(next: typeof pollAuthorization) { pollAuthorization = next },
     discover(next: typeof discovery) { discovery = next }, infer(next: typeof inference) { inference = next },
     editHidden(next: string[]) { updateVolatile(hiddenModels, createVolatile(next)); emitEdit('hiddenModels') },
     editHost(next: string) { updateVolatile(enterpriseUrl, createVolatile(next)); emitEdit('enterpriseUrl') },
@@ -419,6 +423,102 @@ test('management metadata uses the exchanged endpoint and every discovery/exchan
     for (const [key, value] of Object.entries(attributionHeaders())) assert.equal(new Headers(init?.headers).get(key), value)
     assert.equal(init?.redirect, 'error')
   }
+})
+
+test('unload aborts device authorization and a late response cannot resurrect polling or persist an account', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const h = host(t, { signedOut: true })
+  const gate = deferred<Response>()
+  const started = deferred<RequestInit | undefined>()
+  h.authorize(async init => { started.resolve(init); return gate.promise })
+  await h.picker()
+  const pending = h.request('login', {})
+  const request = await started.promise
+  await h.plugin.dispose()
+  gate.resolve(Response.json({ device_code: 'late-device', user_code: 'LATE-CODE', interval: 1, expires_in: 900 }))
+  assert.equal((await pending).envelope.ok, false)
+  assert.equal(request?.signal?.aborted, true)
+  const before = h.requests.length
+  t.mock.timers.tick(10_000)
+  await settle()
+  assert.equal(h.requests.length, before, 'unload must not create device polling requests')
+  assert.deepEqual(h.credentialWrites, [])
+  assert.equal(h.records.has(BRIDGE_RECORD_KEY), false)
+})
+
+test('device authorization transport honors unload cancellation before a server response arrives', async t => {
+  const h = host(t, { signedOut: true })
+  const started = deferred<void>()
+  h.authorize(init => new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+    started.resolve()
+  }))
+  await h.picker()
+  let settled = false
+  const pending = h.request('login', {}).then(response => { settled = true; return response })
+  await started.promise
+  await h.plugin.dispose()
+  await settle()
+  assert.equal(settled, true, 'the cancelled fetch must settle without waiting for a device-code response')
+  assert.equal((await pending).envelope.ok, false)
+  assert.deepEqual(h.credentialWrites, [])
+})
+
+for (const lifecycle of ['logout', 'host-route', 'volatile-host'] as const) {
+  test(`${lifecycle} invalidates pending device authorization even if the configured host is restored`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const h = host(t, { signedOut: true })
+    const gate = deferred<Response>()
+    const started = deferred<RequestInit | undefined>()
+    h.authorize(async init => { started.resolve(init); return gate.promise })
+    await h.picker()
+    const pending = h.request('login', {})
+    const request = await started.promise
+    if (lifecycle === 'logout') await h.request('logout', {})
+    else if (lifecycle === 'host-route') {
+      await h.request('enterprise-url', { enterpriseUrl: 'acme.ghe.com' })
+      await h.request('enterprise-url', { enterpriseUrl: '' })
+    } else {
+      h.editHost('https://acme.ghe.com/')
+      h.editHost('')
+    }
+    gate.resolve(Response.json({ device_code: 'late-device', user_code: 'LATE-CODE', interval: 1, expires_in: 900 }))
+    assert.equal((await pending).envelope.ok, false)
+    assert.equal(request?.signal?.aborted, true)
+    const before = h.requests.length
+    const writes = h.credentialWrites.length
+    t.mock.timers.tick(10_000)
+    await settle()
+    assert.equal(h.requests.length, before, 'cancelled authorization must not create device polling requests')
+    assert.equal(h.credentialWrites.length, writes)
+    assert.equal((await h.request('status')).envelope.value.state, 'signed-out')
+    assert.equal(h.records.has(BRIDGE_RECORD_KEY), false)
+  })
+}
+
+test('logout aborts an in-flight device poll response body without persisting or rescheduling', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const h = host(t, { signedOut: true })
+  const started = deferred<RequestInit | undefined>()
+  h.pollAuthorization(async init => new Response(new ReadableStream({ start(controller) {
+    started.resolve(init)
+    init?.signal?.addEventListener('abort', () => controller.error(init.signal?.reason), { once: true })
+  } })))
+  await h.picker()
+  await h.request('login', {})
+  t.mock.timers.tick(1000)
+  const request = await started.promise
+  await h.request('logout', {})
+  await settle()
+  assert.equal(request?.signal?.aborted, true)
+  const before = h.requests.length
+  const writes = h.credentialWrites.length
+  t.mock.timers.tick(10_000)
+  await settle()
+  assert.equal(h.requests.length, before)
+  assert.equal(h.credentialWrites.length, writes)
+  assert.equal((await h.request('status')).envelope.value.state, 'signed-out')
+  assert.equal(h.records.has(BRIDGE_RECORD_KEY), false)
 })
 
 test('completed device sign-in clears hidden config, discovers the live catalog and notifies the bridge picker', async t => {

@@ -147,6 +147,7 @@ export function apply(ctx: Context, config: Config): void {
   })
   ctx.on('loader/volatile-update', paths => {
     if (paths.some(path => path[0] === 'enterpriseUrl')) {
+      auth.cancelLogin()
       reset()
       void configStore.writeHidden(undefined).catch(error => ctx.logger.warn(`${name}: could not reset hidden models: ${errorMessage(error)}`))
       void discover()

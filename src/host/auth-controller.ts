@@ -32,8 +32,8 @@ export interface AuthControllerDeps {
   readonly onSignedIn?: (account: BridgeAccount) => void | Promise<void>
   /** Called after sign-out deleted the account; failures are logged, never fail sign-out. */
   readonly onSignedOut?: () => void | Promise<void>
-  readonly startDeviceFlow: (enterpriseDomain?: string) => Promise<DeviceAuthorization>
-  readonly pollDeviceFlow: (device: DeviceAuthorization) => Promise<PollResult>
+  readonly startDeviceFlow: (enterpriseDomain?: string, signal?: AbortSignal) => Promise<DeviceAuthorization>
+  readonly pollDeviceFlow: (device: DeviceAuthorization, signal?: AbortSignal) => Promise<PollResult>
   readonly logger: { info(message: string): void; warn(message: string): void; error(error: unknown): void }
   readonly now?: () => number
   readonly setTimer?: (callback: () => void, ms: number) => unknown
@@ -48,7 +48,9 @@ export interface AuthController {
   logout(): Promise<AuthStatus>
   /** Validate, normalize, and persist the enterprise URL; an empty value resets to github.com. */
   setEnterpriseUrl(input: string): Promise<AuthStatus>
-  /** Stop polling; called when the plugin is disposed. */
+  /** Cancel pending authorization and polling when the configured host changes. */
+  cancelLogin(): void
+  /** Permanently stop device-flow work when the plugin is disposed. */
   dispose(): void
 }
 
@@ -64,6 +66,8 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
   const clearTimer = deps.clearTimer ?? ((handle: unknown) => { clearTimeout(handle as NodeJS.Timeout) })
   let flow: Flow = { state: 'signed-out' }
   let generation = 0
+  let disposed = false
+  let deviceRequest: AbortController | undefined
   let timer: unknown
 
   /** Configured enterprise host; an invalid saved value is reported, not silently replaced by github.com. */
@@ -72,8 +76,15 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
 
   const stopPolling = (): void => {
     generation += 1
+    deviceRequest?.abort()
+    deviceRequest = undefined
     if (timer !== undefined) clearTimer(timer)
     timer = undefined
+  }
+
+  const cancelLogin = (): void => {
+    stopPolling()
+    flow = { state: 'signed-out' }
   }
 
   const requireCredentials = (action: string): CredentialStore => {
@@ -127,8 +138,7 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
     }
   }
 
-  const schedulePoll = (device: DeviceAuthorization): void => {
-    stopPolling()
+  const schedulePoll = (device: DeviceAuthorization, abort: AbortController): void => {
     const current = generation
     const deadline = now() + device.expiresIn * 1000
     let interval = device.interval
@@ -144,7 +154,7 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
         finish('expired', 'The device code expired. Start sign-in again.')
         return
       }
-      const result = await deps.pollDeviceFlow(device)
+      const result = await deps.pollDeviceFlow(device, abort.signal)
       if (current !== generation) return
       switch (result.state) {
         case 'done': {
@@ -177,16 +187,25 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
   }
 
   const login = async (): Promise<AuthStatus> => {
-    if (await readAccount() !== undefined) return status()
+    if (disposed) throw new Error('GitHub sign-in is disposed')
+    const current = generation
+    const host = configuredDomain()
+    const account = await readAccount()
+    if (current !== generation || disposed || host !== configuredDomain()) throw new Error('GitHub sign-in was cancelled')
+    if (account !== undefined) return status()
     if (flow.state === 'pending' && now() < flow.expiresAt) return status()
-    schedulePoll(await deps.startDeviceFlow(configuredDomain()))
+    stopPolling()
+    const started = generation
+    const abort = deviceRequest = new AbortController()
+    const device = await deps.startDeviceFlow(host, abort.signal)
+    if (started !== generation || disposed || host !== configuredDomain()) throw new Error('GitHub sign-in was cancelled')
+    schedulePoll(device, abort)
     return status()
   }
 
   const logout = async (): Promise<AuthStatus> => {
     const credentials = requireCredentials('signing out')
-    stopPolling()
-    flow = { state: 'signed-out' }
+    cancelLogin()
     await deleteBridgeAccount(credentials)
     await resetHiddenModels()
     await bestEffort('Sign-out follow-up failed', () => deps.onSignedOut?.())
@@ -196,12 +215,9 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
   const setEnterpriseUrl = async (input: string): Promise<AuthStatus> => {
     const host = normalizeEnterpriseDomain(input)
     if (!deps.config.writable()) throw new Error('saving the enterprise URL needs the settings service and a profile entry')
+    // Invalidate even authorization requests that have not returned a device code yet.
+    cancelLogin()
     await deps.config.write(host)
-    // A device code issued by the previous host cannot complete on the new one.
-    if (flow.state === 'pending') {
-      stopPolling()
-      flow = { state: 'signed-out' }
-    }
     deps.logger.info(`GitHub host set to ${host ?? GITHUB_DOTCOM}`)
     return status()
   }
@@ -218,5 +234,5 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
     return status()
   }
 
-  return { status, login, logout, setEnterpriseUrl, setHiddenModels, dispose: stopPolling }
+  return { status, login, logout, setEnterpriseUrl, setHiddenModels, cancelLogin, dispose() { disposed = true; cancelLogin() } }
 }
