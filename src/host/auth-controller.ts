@@ -29,6 +29,10 @@ export interface AuthControllerDeps {
   /** The credential service, or undefined while it is not mounted. */
   readonly credentials: () => CredentialStore | undefined
   readonly config: BridgeConfig
+  /** Configure the native provider if absent and refresh its model catalog. */
+  readonly ensureProvider: () => Promise<void>
+  /** Full configured provider catalog, before this bridge's visibility filter. */
+  readonly providerModelIds?: () => Promise<readonly string[] | undefined>
   readonly startDeviceFlow: (enterpriseDomain?: string) => Promise<DeviceAuthorization>
   readonly pollDeviceFlow: (device: DeviceAuthorization) => Promise<PollResult>
   readonly logger: { info(message: string): void; warn(message: string): void; error(error: unknown): void }
@@ -63,6 +67,7 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
   const clearTimer = deps.clearTimer ?? ((handle: unknown) => { clearTimeout(handle as NodeJS.Timeout) })
   let flow: Flow = { state: 'signed-out' }
   let generation = 0
+  let providerSetup: AuthStatus['providerSetup']
   let timer: unknown
   const models = createModelFilter(deps.credentials, deps.config, message => deps.logger.warn(message))
 
@@ -120,14 +125,41 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
       return { ...base, authenticated: false, ...(flow.state === 'authenticated' ? { state: 'signed-out' } : flow) }
     }
     const signedInHost = grantEnterpriseDomain(record) ?? GITHUB_DOTCOM
-    const modelIds = fullModelIds(record)
+    let modelIds = fullModelIds(record)
+    let modelCatalogSource: 'provider' | undefined
+    if (modelIds === undefined) {
+      try {
+        const ids = await deps.providerModelIds?.()
+        if (ids !== undefined) {
+          modelIds = [...new Set(ids)]
+          modelCatalogSource = 'provider'
+        }
+      } catch (error) {
+        deps.logger.warn(`Could not read GitHub Copilot provider catalog: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     return {
       ...base,
       authenticated: true,
       state: 'authenticated',
+      ...(providerSetup === undefined ? {} : { providerSetup }),
       ...(signedInHost === base.githubHost ? {} : { signedInHost }),
+      ...(modelCatalogSource === undefined ? {} : { modelCatalogSource }),
       hiddenModels: [...new Set(deps.config.readHidden())].filter(id => modelIds === undefined || modelIds.includes(id)),
       ...(modelIds === undefined ? {} : { modelCount: modelIds.length, availableModels: [...modelIds].sort() }),
+    }
+  }
+
+  const setupProvider = async (current: number): Promise<void> => {
+    if (current !== generation) return
+    providerSetup = 'pending'
+    try {
+      await deps.ensureProvider()
+      if (current === generation) providerSetup = 'ready'
+    } catch (error) {
+      if (current !== generation) return
+      providerSetup = 'warning'
+      deps.logger.warn(`Could not set up GitHub Copilot provider: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -153,11 +185,16 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
       switch (result.state) {
         case 'done':
           try {
+            // Credential events can reach the client before setup finishes. Keep its status poll alive.
+            providerSetup = 'pending'
             await storeToken(result.token, device.domain === GITHUB_DOTCOM ? undefined : device.domain)
             await resetHiddenModels()
+            await setupProvider(current)
+            if (current !== generation) return
             finish('authenticated')
-            deps.logger.info(`GitHub Copilot sign-in at ${device.domain} completed; the ${PI_AI_PROVIDER} route can now authenticate`)
+            deps.logger.info(`GitHub Copilot sign-in at ${device.domain} completed`)
           } catch (error) {
+            if (current === generation) providerSetup = undefined
             finish('error', error instanceof Error ? error.message : String(error))
             deps.logger.error(error)
           }
@@ -174,7 +211,10 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
   }
 
   const login = async (): Promise<AuthStatus> => {
-    if (grantToken(await readGrant()) !== undefined) return status()
+    if (grantToken(await readGrant()) !== undefined) {
+      await setupProvider(generation)
+      return status()
+    }
     if (flow.state === 'pending' && now() < flow.expiresAt) return status()
     schedulePoll(await deps.startDeviceFlow(configuredDomain()))
     return status()
@@ -184,6 +224,7 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
     const credentials = requireCredentials('signing out')
     stopPolling()
     flow = { state: 'signed-out' }
+    providerSetup = undefined
     await credentials.deleteRecord(recordKey())
     await resetHiddenModels()
     return status()

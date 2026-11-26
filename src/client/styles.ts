@@ -16,7 +16,6 @@ export const css = {
   hint: { margin: 0, fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-tertiary)' },
   body: { margin: 0, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' },
   error: { margin: 0, whiteSpace: 'pre-wrap', color: 'var(--dsw-alias-label-error, var(--dsw-alias-state-danger-label))' },
-  modalBody: { display: 'flex', flexDirection: 'column', gap: 14 },
   codeRow: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
   code: { width: '180px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', letterSpacing: '2px', fontWeight: 600 },
   versionLink: { color: 'var(--dsw-alias-brand-primary)' },

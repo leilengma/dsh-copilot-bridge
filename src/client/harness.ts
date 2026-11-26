@@ -18,12 +18,6 @@ export interface LocaleRuntime {
   subscribe(listener: () => void): Dispose
 }
 
-interface SlotBase {
-  readonly id: string
-  readonly order?: number
-  readonly locale?: string
-}
-
 /**
  * Owner props of the Models page `settings.models.provider-card` keyed slot
  * (`@deepseek-ai/dsh-client-ui-settings-models` slot-contract), trimmed to
@@ -40,9 +34,22 @@ export interface ProviderCardProps {
 
 /** `@deepseek-ai/dsh-client-ui-renderer`: the UI slot registry. */
 export interface SlotRegistry {
-  register(slot: SlotBase & { readonly name: 'conversation.input.overlay' }, component: ComponentType): Dispose
-  /** Plugins page list item: summary on its card, page when the card is opened. */
-  register(slot: SlotBase & { readonly name: 'plugins.item'; readonly label: () => string }, component: ComponentType<{ readonly view: 'summary' | 'page' }>): Dispose
+  /** Layout main panel and matching host-owned sidebar navigation entry. */
+  register(slot: { readonly name: 'main'; readonly key: string; readonly locale?: string }, component: ComponentType): Dispose
+  register(slot: {
+    readonly name: 'sidebar.panellist'
+    readonly id: string
+    readonly order?: number
+    readonly label: () => string
+    readonly locale?: string
+  }, component: ComponentType<{ readonly size: number; readonly active: boolean }>): Dispose
+  /** Bundle configuration: keyed by npm package name, rendered under its metadata/icon header. */
+  register(slot: {
+    readonly name: 'plugins.bundle.config'
+    readonly key: string
+    readonly locale?: string
+    readonly inject: () => { readonly onOpen: () => void }
+  }, component: ComponentType<{ readonly onOpen: () => void }>): Dispose
   /** Keyed slot: one entry per `key` and `priority`; a second entry at an occupied cell throws. */
   register(slot: {
     readonly name: 'settings.models.provider-card'
@@ -54,61 +61,17 @@ export interface SlotRegistry {
   inject(name: string, register: () => Dispose): void
 }
 
-export interface CommandConfirmation {
-  readonly title: string
-  readonly description: string
-  readonly acknowledgeLabel: string
-  readonly cancelLabel: string
-  readonly confirmLabel: string
-}
-
-export interface PopupOption {
-  readonly id: string
-  readonly label: string
-  readonly detail?: string
-  readonly confirmation?: CommandConfirmation
-}
-
-/** `@deepseek-ai/dsh-client-ui-commands`: client-side command decoration. */
-export interface CommandUiRuntime {
-  decorate(decoration: {
-    readonly name: string
-    readonly available: () => boolean
-    readonly ui: {
-      readonly kind: 'popupSelect'
-      readonly options: () => Promise<readonly PopupOption[]>
-      readonly onSelect: (option: PopupOption, session: { readonly sessionId: string }) => Promise<void>
-    }
-  }): Dispose
-}
-
-type CommandOutcome =
-  | { readonly ok: true; readonly value: { readonly matched: boolean } }
-  | { readonly ok: false; readonly error: { readonly message: string } }
-
-/** `@deepseek-ai/dsh-api-session-controller`: live session bindings. */
-export interface SessionsRuntime {
-  binding(sessionId: string): { readonly session: { command(text: string): Promise<CommandOutcome> } } | undefined
-}
-
 /** `@deepseek-ai/dsh-api-remotes`: Host events forwarded to the browser. */
 export interface ClientRemote {
   $on(event: 'credentials/reference-updated' | 'credentials/record-updated', listener: (ref: string) => void): Dispose
 }
 
-/** Command result as the `command/executed` event delivers it. */
-export interface ExecutedCommandResult {
-  readonly kind: 'success' | 'error'
-  readonly text?: string
-}
-
 /** The client plugin context, restricted to the services listed in `inject`. */
 export interface ClientContext {
+  /** @deepseek-ai/dsh-client-ui-layout: selects a registered main slot key. */
+  readonly layout: { selectPanel(panelId: string): void }
   readonly locale: LocaleRuntime
   readonly slots: SlotRegistry
-  readonly commandUi: CommandUiRuntime
-  readonly sessions: SessionsRuntime
   readonly remote: ClientRemote
   effect(setup: () => Dispose | (() => Promise<void>), label?: string): void
-  on(event: 'command/executed', listener: (sessionId: string, name: string, result: ExecutedCommandResult) => void): Dispose
 }

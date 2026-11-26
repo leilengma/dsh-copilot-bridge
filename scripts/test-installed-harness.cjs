@@ -10,6 +10,7 @@ const { Context } = load('cordis')
 const { LlmRuntime } = load('dsh-llm')
 const piAi = load('dsh-llm-pi-ai')
 const bridge = require('../lib/index.js')
+const recordKey = 'llm-pi-ai/github-copilot'
 const settle = () => new Promise(resolve => setImmediate(resolve))
 
 async function main() {
@@ -95,4 +96,95 @@ async function main() {
     await ctx.fiber.dispose()
   }
 }
-main().catch(error => { console.error(error); process.exitCode = 1 })
+async function testProviderSetup(initiallyWritable) {
+  const { createVolatile, updateVolatile } = load('cosmokit')
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => { throw new Error('provider setup must use the fixture grant, not the network') }
+  const ctx = new Context()
+  const runtime = new LlmRuntime(ctx)
+  const config = piAi.Config({ providers: {} })
+  piAi.apply(ctx, config)
+  let providers = {}
+  let revision = 0
+  let writes = 0
+  const settings = {
+    writable: initiallyWritable,
+    configure: () => () => {},
+    describe: () => [{ ns: 'llm-pi-ai', value: { providers }, revision }],
+    async mutate(ns, ops, expectedRevision) {
+      assert.equal(settings.writable, true)
+      assert.equal(ns, 'llm-pi-ai')
+      assert.equal(expectedRevision, revision)
+      assert.deepEqual(ops, [{ op: 'set', path: ['providers', 'github-copilot'], value: {} }])
+      providers = { ...providers, 'github-copilot': {} }
+      revision++
+      writes++
+      updateVolatile(config.providers, createVolatile(providers))
+      ctx.emit('loader/volatile-update', [['providers', 'github-copilot']])
+    },
+  }
+  ctx.provide('settings', settings)
+  let catalogUpdates = 0
+  ctx.on('llm/models-updated', provider => { if (provider === 'github-copilot') catalogUpdates++ })
+  let record = { kind: 'grant', payload: { type: 'oauth', access: 'fixture-only', refresh: 'fixture-only', expires: Number.MAX_SAFE_INTEGER } }
+  ctx.provide('credentials', {
+    async readRecord() { return record },
+    async modifyRecord(_key, update) {
+      const next = await update(record)
+      if (next !== undefined) { record = next; ctx.emit('credentials/record-updated', recordKey) }
+      return record
+    },
+    async deleteRecord() { record = undefined; ctx.emit('credentials/record-updated', recordKey) },
+  })
+  const routes = new Map()
+  ctx.provide('connection', { fetch: { register(route) { routes.set(route.path, route); return async () => {} } } })
+  const fiber = ctx.plugin(bridge)
+  const request = async (action, method = 'POST') => {
+    const response = await routes.get(`/api/copilot-bridge/${action}`).fetch(new Request(`https://localhost/api/copilot-bridge/${action}`, { method }))
+    const body = await response.json()
+    assert.equal(response.status, 200, JSON.stringify(body))
+    return body.value
+  }
+  try {
+    await settle()
+    assert.ok(!runtime.listProviders().some(provider => provider.id === 'github-copilot'))
+    if (!initiallyWritable) {
+      const warning = await request('login')
+      assert.equal(warning.authenticated, true)
+      assert.equal(warning.providerSetup, 'warning')
+      assert.equal(writes, 0)
+      assert.equal(record.payload.refresh, 'fixture-only')
+      settings.writable = true
+    }
+    const signedIn = await request('login')
+    assert.equal(signedIn.authenticated, true)
+    assert.equal(signedIn.providerSetup, 'ready')
+    assert.ok(runtime.listProviders().some(provider => provider.id === 'github-copilot'))
+    assert.ok((await runtime.listModels('github-copilot')).length > 0)
+    assert.equal(record.payload.availableModelIds, undefined, 'fixture must model a fresh grant without account discovery')
+    const catalog = await request('models', 'GET')
+    assert.equal(catalog.status.modelCatalogSource, 'provider')
+    assert.equal(catalog.models.length, (await runtime.listModels('github-copilot')).length, 'management must populate before any chat request')
+    assert.ok(catalog.models.some(model => model.id === 'claude-haiku-4.5'))
+    assert.equal((await request('login')).providerSetup, 'ready')
+    assert.equal(writes, 1, 'repeated sign-in must not recreate a configured provider')
+    const beforeLogout = catalogUpdates
+    assert.equal((await request('logout')).authenticated, false)
+    await settle()
+    assert.deepEqual(providers, { 'github-copilot': {} }, 'sign-out retains provider configuration')
+    assert.equal(writes, 1)
+    assert.ok(runtime.listProviders().some(provider => provider.id === 'github-copilot'))
+    assert.deepEqual(await runtime.listModels('github-copilot'), [], 'a retained provider must not advertise models after logout')
+    assert.ok(catalogUpdates > beforeLogout, 'logout must invalidate remote model pickers')
+    record = { kind: 'grant', payload: { type: 'oauth', access: 'fixture-again', refresh: 'fixture-again', expires: Number.MAX_SAFE_INTEGER } }
+    ctx.emit('credentials/record-updated', recordKey)
+    await settle()
+    assert.ok((await runtime.listModels('github-copilot')).length > 0, 'models return on sign-in without recreating the provider')
+    console.log(`PASS: installed pi-ai provider auto-configuration${initiallyWritable ? '' : ' after read-only warning/retry'}; logout hides models and invalidates selectors, sign-in restores them`)
+  } finally {
+    globalThis.fetch = originalFetch
+    await fiber.dispose()
+    await ctx.fiber.dispose()
+  }
+}
+main().then(() => testProviderSetup(true)).then(() => testProviderSetup(false)).catch(error => { console.error(error); process.exitCode = 1 })

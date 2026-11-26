@@ -32,6 +32,7 @@ await build({
   format: 'cjs',
   target: 'es2022',
   jsx: 'automatic',
+  loader: { '.svg': 'dataurl' },
   external: ['react', 'react/jsx-runtime', '@deepseek-ai/*'],
   define,
   banner: {

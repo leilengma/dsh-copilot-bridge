@@ -1,35 +1,26 @@
 /**
- * dsh-copilot-bridge Web client: the Plugins Account/Models tabs,
- * the `/copilot-login` device-code dialog, and the
- * `/copilot-logout` confirmation.
+ * dsh-copilot-bridge Web client: the Plugins Account/Models tabs.
  */
 import type { ClientContext } from './harness.ts'
 import { PI_AI_RECORD_KEY } from '../shared/contract.ts'
-import { LoginDialog } from './components.tsx'
 import { DICTIONARIES, LOCALE_NS, bindLocale, text } from './i18n.ts'
-import { CopilotPluginEntry } from './plugin-page.tsx'
+import { CopilotIcon, CopilotPanel, CopilotShortcut } from './navigation.tsx'
 import { CopilotProviderCardNotice } from './provider-card.tsx'
-import { bumpAuthRevision, closeLoginDialogWhenAuthenticated, showLoginResult } from './store.ts'
+import { bumpAuthRevision } from './store.ts'
 
 const SECTION_ID = 'copilot-bridge'
 /** Settings namespace of the pi-ai adapter that owns the `github-copilot` route; the provider-card slot key. */
 const PI_AI_SETTINGS_NS = 'llm-pi-ai'
 
-export const inject = ['slots', 'commandUi', 'sessions', 'locale', 'remote']
+export const inject = ['slots', 'locale', 'remote', 'layout']
 
 export function apply(ctx: ClientContext): void {
   bindLocale(ctx.locale)
   ctx.effect(() => ctx.locale.register(LOCALE_NS, DICTIONARIES), `${SECTION_ID}: locale dictionaries`)
 
-  ctx.on('command/executed', (_sessionId, commandName, result) => showLoginResult(commandName, result.text))
-
-  // A committed credential closes the dialog as soon as the Host confirms it.
   ctx.effect(
-    () => ctx.remote.$on('credentials/reference-updated', () => {
-      bumpAuthRevision()
-      void closeLoginDialogWhenAuthenticated()
-    }),
-    `${SECTION_ID}: close login dialog after credential commit`,
+    () => ctx.remote.$on('credentials/reference-updated', bumpAuthRevision),
+    `${SECTION_ID}: refresh account after credential changes`,
   )
 
   // Discovery and visibility edits update the grant record without necessarily
@@ -41,47 +32,27 @@ export function apply(ctx: ClientContext): void {
     `${SECTION_ID}: refresh discovered models`,
   )
 
-  ctx.effect(() => ctx.commandUi.decorate({
-    name: 'copilot-logout',
-    available: () => true,
-    ui: {
-      kind: 'popupSelect',
-      options: async () => [{
-        id: 'logout',
-        label: text('logoutOption'),
-        detail: text('logoutOptionDetail'),
-        confirmation: {
-          title: text('logoutConfirmTitle'),
-          description: text('logoutConfirmDescription'),
-          acknowledgeLabel: text('logoutAcknowledge'),
-          cancelLabel: text('cancel'),
-          confirmLabel: text('logoutConfirm'),
-        },
-      }],
-      onSelect: async (_option, session) => {
-        const live = ctx.sessions.binding(session.sessionId)?.session
-        if (live === undefined) throw new Error(text('sessionUnavailable'))
-        const result = await live.command('/copilot-logout')
-        if (!result.ok) throw new Error(text('logoutFailed', { message: result.error.message }))
-        if (!result.value.matched) throw new Error(text('commandUnavailable'))
-      },
-    },
-  }), `${SECTION_ID}: confirm /copilot-logout`)
-
-  ctx.slots.inject('conversation.input.overlay', () => ctx.slots.register({
-    name: 'conversation.input.overlay',
-    id: `${SECTION_ID}-login-dialog`,
-    order: 50,
+  // Host navigation owns sidebar selection, collapsed-row tooltips, and panel lifecycle.
+  ctx.slots.inject('main', () => ctx.slots.register({
+    name: 'main',
+    key: SECTION_ID,
     locale: LOCALE_NS,
-  }, LoginDialog))
-
-  ctx.slots.inject('plugins.item', () => ctx.slots.register({
-    name: 'plugins.item',
-    id: `${SECTION_ID}-models`,
-    order: 20,
-    locale: LOCALE_NS,
+  }, CopilotPanel))
+  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+    name: 'sidebar.panellist',
+    id: SECTION_ID,
+    order: 10,
     label: () => text('nav'),
-  }, CopilotPluginEntry))
+    locale: LOCALE_NS,
+  }, CopilotIcon))
+
+  // Keep the installed bundle's metadata/icon and offer a full-page shortcut.
+  ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
+    name: 'plugins.bundle.config',
+    key: 'dsh-copilot-bridge',
+    locale: LOCALE_NS,
+    inject: () => ({ onOpen: () => ctx.layout.selectPanel(SECTION_ID) }),
+  }, CopilotShortcut))
 
   // Models page: tell the user the github-copilot card needs no API key. The
   // slot is keyed by adapter namespace, so the entry receives every pi-ai

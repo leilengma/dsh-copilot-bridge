@@ -10,13 +10,8 @@ import { css } from './styles.ts'
 
 type Tab = 'account' | 'models'
 
-/** Plugins keeps one stable entry for both authentication and model management. */
-export function CopilotPluginEntry({ view }: { readonly view: 'summary' | 'page' }) {
-  useLocaleRevision()
-  return view === 'summary' ? <>{text('modelsSummary')}</> : <CopilotPluginPage />
-}
-
-function CopilotPluginPage() {
+/** Shared Account/Models content within the full-page Copilot panel. */
+export function CopilotPluginPage() {
   useLocaleRevision()
   const revision = useSyncExternalStore(authRevision.subscribe, authRevision.getSnapshot, authRevision.getSnapshot)
   const [status, setStatus] = useState<AuthStatus>()

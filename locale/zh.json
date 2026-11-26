@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "GitHub Copilot",
+    "description": "登录 GitHub Copilot 并管理可用模型，支持 GitHub Enterprise 账户。"
+  }
+}

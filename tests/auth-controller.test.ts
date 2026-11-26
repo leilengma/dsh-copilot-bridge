@@ -53,7 +53,10 @@ interface Harness {
   readonly controller: ReturnType<typeof createAuthController>
 }
 
-function harness(): Harness {
+function harness(
+  ensureProvider: () => Promise<void> = async () => {},
+  providerModelIds?: () => Promise<readonly string[] | undefined>,
+): Harness {
   const credentials = new FakeCredentials()
   const config = new FakeConfig()
   const started: (string | undefined)[] = []
@@ -63,6 +66,8 @@ function harness(): Harness {
   const controller = createAuthController({
     credentials: () => credentials,
     config,
+    ensureProvider,
+    ...(providerModelIds === undefined ? {} : { providerModelIds }),
     async startDeviceFlow(domain): Promise<DeviceAuthorization> {
       started.push(domain)
       const host = domain ?? 'github.com'
@@ -84,6 +89,131 @@ function harness(): Harness {
     },
   }
 }
+
+test('completed sign-in stores the credential before setting up the provider', async () => {
+  let calls = 0
+  const h = harness(async () => {
+    calls++
+    assert.equal(h.credentials.records.get(PI_AI_RECORD_KEY)?.kind, 'grant')
+    assert.equal((await h.controller.status()).providerSetup, 'pending')
+  })
+  await h.controller.login()
+  assert.equal(calls, 0)
+  h.polls.push({ state: 'done', token: 'ghu_new' })
+  await h.tick()
+  const status = await h.controller.status()
+  assert.equal(calls, 1)
+  assert.equal(status.authenticated, true)
+  assert.equal(status.providerSetup, 'ready')
+  await h.controller.logout()
+  assert.equal(calls, 1, 'sign-out must not change provider configuration')
+  assert.equal((await h.controller.status()).providerSetup, undefined)
+})
+
+test('provider setup failure preserves the grant and reports a warning instead of failed sign-in', async () => {
+  const h = harness(async () => { throw new Error('settings are read-only') })
+  await h.controller.login()
+  h.polls.push({ state: 'done', token: 'ghu_new' })
+  await h.tick()
+  const status = await h.controller.status()
+  assert.equal(status.authenticated, true)
+  assert.equal(status.state, 'authenticated')
+  assert.equal(status.providerSetup, 'warning')
+  assert.equal(h.credentials.records.get(PI_AI_RECORD_KEY)?.kind, 'grant')
+  assert.match(h.warnings.join('\n'), /provider.*settings are read-only/i)
+})
+
+test('an already-authenticated login can retry provider setup after a warning', async () => {
+  let attempts = 0
+  const h = harness(async () => { if (++attempts === 1) throw new Error('write failed') })
+  catalog(h, ['a'])
+  assert.equal((await h.controller.login()).providerSetup, 'warning')
+  assert.equal((await h.controller.login()).providerSetup, 'ready')
+  assert.deepEqual(h.started, [], 'never restart OAuth for provider configuration')
+})
+
+test('a late provider setup result cannot restore a warning or ready state after sign-out', async () => {
+  let finish!: () => void
+  const h = harness(() => new Promise(resolve => { finish = resolve }))
+  await h.controller.login()
+  h.polls.push({ state: 'done', token: 'ghu_new' })
+  await h.tick()
+  assert.equal((await h.controller.status()).providerSetup, 'pending')
+  await h.controller.logout()
+  finish()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal((await h.controller.status()).authenticated, false)
+  assert.equal((await h.controller.status()).providerSetup, undefined)
+})
+
+test('a fresh sign-in exposes the full provider catalog before the first chat request', async () => {
+  let reads = 0
+  const h = harness(undefined, async () => { reads++; return ['b', 'a', 'a'] })
+  await h.controller.status()
+  assert.equal(reads, 0, 'signed-out reads must not discover provider models')
+  await h.controller.login()
+  h.polls.push({ state: 'done', token: 'ghu_new' })
+  await h.tick()
+  const status = await h.controller.status()
+  assert.equal(status.authenticated, true)
+  assert.deepEqual(status.availableModels, ['a', 'b'])
+  assert.equal(status.modelCount, 2)
+  assert.equal(status.modelCatalogSource, 'provider')
+  h.config.hidden = ['a', 'b']
+  assert.deepEqual((await h.controller.status()).availableModels, ['a', 'b'], 'hidden rows remain restorable')
+  catalog(h, ['c'])
+  const discovered = await h.controller.status()
+  assert.deepEqual(discovered.availableModels, ['c'], 'account-discovered models take precedence over a static provider catalog')
+  assert.equal(discovered.modelCatalogSource, undefined)
+  catalog(h, [])
+  assert.deepEqual((await h.controller.status()).availableModels, [], 'a known empty account catalog must not fall back to all provider models')
+})
+
+test('provider catalog failure does not invalidate a successful sign-in', async () => {
+  const h = harness(undefined, async () => { throw new Error('catalog unavailable') })
+  await h.controller.login()
+  h.polls.push({ state: 'done', token: 'ghu_new' })
+  await h.tick()
+  const status = await h.controller.status()
+  assert.equal(status.authenticated, true)
+  assert.equal(status.availableModels, undefined)
+  assert.ok(h.warnings.some(warning => warning.includes('catalog unavailable')))
+})
+
+test('status reads never configure a provider, even with an existing credential', async () => {
+  let calls = 0
+  const h = harness(async () => { calls++ })
+  catalog(h, ['a'])
+  assert.equal((await h.controller.status()).authenticated, true)
+  assert.equal((await h.controller.status()).providerSetup, undefined)
+  assert.equal(calls, 0)
+})
+
+test('a credential write failure never starts provider setup', async () => {
+  let calls = 0
+  const h = harness(async () => { calls++ })
+  await h.controller.login()
+  const modifyRecord = h.credentials.modifyRecord.bind(h.credentials)
+  h.credentials.modifyRecord = async () => { throw new Error('credential storage failed') }
+  h.polls.push({ state: 'done', token: 'ghu_new' })
+  await h.tick()
+  h.credentials.modifyRecord = modifyRecord
+  const status = await h.controller.status()
+  assert.equal(status.authenticated, false)
+  assert.equal(status.state, 'error')
+  assert.equal(status.providerSetup, undefined)
+  assert.equal(calls, 0)
+})
+
+test('denied authorization never creates a provider', async () => {
+  let calls = 0
+  const h = harness(async () => { calls++ })
+  await h.controller.login()
+  h.polls.push({ state: 'denied' })
+  await h.tick()
+  assert.equal(calls, 0)
+  assert.equal((await h.controller.status()).providerSetup, undefined)
+})
 
 test('status keeps the full account catalog while hidden models are removed from selection', async () => {
   const h = harness()

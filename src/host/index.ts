@@ -12,23 +12,24 @@
  */
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import type { CommandResult } from '@deepseek-ai/dsh-commands'
-// Type-only: augment `Context` with `credentials`, `settings`, `connection`, `commands`, and `fiber.entry`.
-import type {} from '@deepseek-ai/dsh-credentials'
+// Type-only: augment `Context` with `credentials`, `settings`, `connection`, and `fiber.entry`.
+import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
-import { PI_AI_PROVIDER, PI_AI_RECORD_KEY, type AuthStatus } from '../shared/contract.ts'
+import { PI_AI_PROVIDER, PI_AI_RECORD_KEY, PI_AI_RECORD_SCOPE } from '../shared/contract.ts'
 import { createAuthController, type AuthController, type BridgeConfig } from './auth-controller.ts'
 import { pollDeviceFlow, startDeviceFlow } from './device-flow.ts'
 import { createCopilotUsage } from './copilot-usage.ts'
 import { createCopilotMetadata } from './copilot-metadata.ts'
 import { authRoutes } from './routes.ts'
 import { filterModelSelection } from './model-selection.ts'
+import { ensureCopilotProvider } from './provider-setup.ts'
+import { grantToken } from './grant.ts'
 
 export const name = 'copilot-bridge'
 
-/** No hard inject: `credentials`, `settings`, `connection`, and `commands` are optional and resolved when present. */
+/** No hard inject: `credentials`, `settings`, and `connection` are optional and resolved when present. */
 export const inject: string[] = []
 
 export interface Config {
@@ -93,78 +94,22 @@ function registerRoutes(ctx: Context, auth: AuthController): void {
   })
 }
 
-function loginText(status: AuthStatus): string {
-  if (status.authenticated) return 'GitHub Copilot is already authenticated. Run /copilot-status for details.'
-  return [
-    `GitHub Copilot sign-in (${status.githubHost})`,
-    `1. Open this URL in your browser: ${status.verificationUri ?? ''}`,
-    `2. Enter this code: ${status.userCode ?? ''}`,
-    '3. Authorize the GitHub App (VS Code) and complete sign-in.',
-    '',
-    'Polling continues in the background; the credential is stored once you authorize.',
-    `Then select a model under the "${PI_AI_PROVIDER}" provider in Settings → Models.`,
-  ].join('\n')
-}
-
-function statusText(status: AuthStatus): string {
-  if (!status.authenticated) {
-    return `GitHub Copilot is NOT signed in (host: ${status.githubHost}). Run /copilot-login to sign in.`
-  }
-  return [
-    `GitHub Copilot: authenticated at ${status.signedInHost ?? status.githubHost}.`,
-    ...status.signedInHost === undefined ? [] : [
-      `The configured host is now ${status.githubHost}; run /copilot-logout and /copilot-login to switch.`,
-    ],
-    `Credential published to the "${status.provider}" provider.`,
-    status.modelCount === undefined
-      ? 'The model list is populated by that provider on its first request.'
-      : `Models available to this account: ${status.modelCount}`,
-    ...(status.hiddenModels?.length ? [`Hidden from model selection: ${status.hiddenModels.length}`] : []),
-  ].join('\n')
-}
-
-function registerCommands(ctx: Context, auth: AuthController): void {
-  const run = (render: () => Promise<string>) => async (): Promise<CommandResult> => {
-    try {
-      return { kind: 'success', text: await render() }
-    } catch (error) {
-      return { kind: 'error', text: errorMessage(error) }
-    }
-  }
-  ctx.inject(['commands'], commandsCtx => {
-    commandsCtx.effect(() => {
-      const disposers = [
-        commandsCtx.commands.register({
-          name: 'copilot-login',
-          description: 'Sign in to GitHub Copilot via the device flow',
-          handler: run(async () => loginText(await auth.login())),
-        }),
-        commandsCtx.commands.register({
-          name: 'copilot-status',
-          description: 'Show GitHub Copilot authentication status',
-          handler: run(async () => statusText(await auth.status())),
-        }),
-        commandsCtx.commands.register({
-          name: 'copilot-logout',
-          description: 'Sign out of GitHub Copilot and remove the stored credential',
-          handler: run(async () => {
-            const wasSignedIn = (await auth.status()).authenticated
-            await auth.logout()
-            return wasSignedIn
-              ? `GitHub Copilot signed out; the "${PI_AI_PROVIDER}" credential has been removed.`
-              : 'GitHub Copilot is not signed in. Nothing to do.'
-          }),
-        }),
-      ]
-      return () => { for (const dispose of disposers.reverse()) dispose() }
-    }, `${name}: slash commands`)
-  })
-}
-
 export function apply(ctx: Context, config: Config): void {
+  let providerModelIds: (() => Promise<readonly string[]>) | undefined
   const auth = createAuthController({
     credentials: () => ctx.get('credentials'),
     config: bridgeConfig(ctx, config),
+    providerModelIds: async () => providerModelIds?.(),
+    ensureProvider: () => ensureCopilotProvider({
+      settings: () => ctx.get('settings'),
+      llm: () => ctx.get('llm'),
+      async refresh() {
+        const llm = ctx.get('llm')
+        if (llm === undefined) throw new Error('the LLM service is unavailable')
+        await llm.listModels(PI_AI_PROVIDER)
+        await ctx.parallel('llm/models-updated', PI_AI_PROVIDER)
+      },
+    }),
     startDeviceFlow,
     pollDeviceFlow,
     logger: {
@@ -184,8 +129,21 @@ export function apply(ctx: Context, config: Config): void {
         .catch(error => ctx.logger.warn(`${name}: model selection refresh failed: ${errorMessage(error)}`))
     }
     llmCtx.effect(() => {
-      const dispose = filterModelSelection(llmCtx.llm, () => config.hiddenModels.get() ?? [])
-      return () => { dispose(); notify() }
+      // A fresh grant has no account model ids. Keep a full provider catalog
+      // reader for management; going through our picker filter loses hidden rows.
+      const runtime = llmCtx.llm
+      const original = runtime.listModels
+      const fullCatalog = async () => (await original.call(runtime, PI_AI_PROVIDER)).map(model => model.id)
+      providerModelIds = fullCatalog
+      const dispose = filterModelSelection(runtime, () => config.hiddenModels.get() ?? [], async () => {
+        const record = await llmCtx.get('credentials')?.readRecord(credentialKey(PI_AI_RECORD_SCOPE, PI_AI_PROVIDER))
+        return grantToken(record) !== undefined
+      })
+      return () => {
+        if (providerModelIds === fullCatalog) providerModelIds = undefined
+        dispose()
+        notify()
+      }
     }, `${name}: model selection filter`)
     notify()
     // Loader targets only the entry fiber, not this injected child's fiber.
@@ -193,6 +151,15 @@ export function apply(ctx: Context, config: Config): void {
     llmCtx.effect(() => ctx.on('loader/volatile-update', paths => {
       if (paths.some(path => path[0] === 'hiddenModels')) notify()
     }), `${name}: model selection config updates`)
+    // The adapter's static catalog does not change on logout. Explicitly
+    // invalidate cached pickers when the grant changes, even with no hidden ids.
+    llmCtx.effect(() => ctx.on('credentials/record-updated', key => {
+      if (key === PI_AI_RECORD_KEY) notify()
+    }), `${name}: model selection credential updates`)
+    llmCtx.inject(['credentials'], credentialsCtx => {
+      notify()
+      credentialsCtx.effect(() => () => notify(), `${name}: model selection credentials lifetime`)
+    })
   })
 
   // This plugin ships its own Settings page; hide the generated form.
@@ -201,5 +168,4 @@ export function apply(ctx: Context, config: Config): void {
   })
 
   registerRoutes(ctx, auth)
-  registerCommands(ctx, auth)
 }
