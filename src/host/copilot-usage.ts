@@ -1,6 +1,6 @@
-import { credentialKey, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
-import { PI_AI_PROVIDER, PI_AI_RECORD_SCOPE, type CopilotUsage } from '../shared/contract.ts'
-import { grantEnterpriseDomain, grantToken } from './grant.ts'
+import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
+import type { CopilotUsage } from '../shared/contract.ts'
+import { readBridgeAccount } from './bridge-credentials.ts'
 import { githubFetch } from './transport.ts'
 
 const object = (value: unknown): Record<string, unknown> | undefined =>
@@ -43,15 +43,13 @@ export function createCopilotUsage(deps: {
   readonly fetch?: typeof githubFetch
 }): () => Promise<CopilotUsage> {
   const fetch = deps.fetch ?? githubFetch
-  const key = credentialKey(PI_AI_RECORD_SCOPE, PI_AI_PROVIDER)
   let pending: { token: string; domain: string; value: Promise<CopilotUsage> } | undefined
   return async () => {
     try {
-      const credentials = deps.credentials()
-      const record = await credentials?.readRecord(key)
-      const token = grantToken(record)
-      if (!token) { pending = undefined; return { state: 'signed-out' } }
-      const domain = grantEnterpriseDomain(record) ?? 'github.com'
+      const account = await readBridgeAccount(deps.credentials())
+      if (!account) { pending = undefined; return { state: 'signed-out' } }
+      const { token } = account
+      const domain = account.enterpriseHost ?? 'github.com'
       // Only a stored, validated issuer receives the OAuth credential; never the current draft/config.
       if (!/^[a-z0-9]+(?:[.-][a-z0-9]+)*\.[a-z]{2,}$/.test(domain)) return { state: 'unavailable' }
       if (pending?.token === token && pending.domain === domain) return pending.value
@@ -67,9 +65,9 @@ export function createCopilotUsage(deps: {
           })
           if (!response.ok) return { state: 'unavailable' }
           const result = parseUsage(await response.json())
-          const current = await deps.credentials()?.readRecord(key)
-          if (!grantToken(current)) return { state: 'signed-out' }
-          if (grantToken(current) !== token || (grantEnterpriseDomain(current) ?? 'github.com') !== domain) return { state: 'unavailable' }
+          const current = await readBridgeAccount(deps.credentials())
+          if (!current) return { state: 'signed-out' }
+          if (current.token !== token || (current.enterpriseHost ?? 'github.com') !== domain) return { state: 'unavailable' }
           return result
         } catch { return { state: 'unavailable' } } // Transport errors may contain credentials.
         finally { if (pending === entry) pending = undefined }

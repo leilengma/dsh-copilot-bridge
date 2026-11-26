@@ -2,9 +2,9 @@
  * dsh-copilot-bridge Host plugin.
  *
  * Runs the GitHub OAuth device flow against github.com or a GitHub Enterprise
- * host and writes the result as the grant record `llm-pi-ai` reads for its
- * built-in `github-copilot` provider. That route performs the Copilot token
- * exchange, discovers models, and serves every request.
+ * host and stores the result in the bridge's own credential record
+ * `copilot-bridge/github`. The native `llm-pi-ai/github-copilot` record is
+ * never read or written.
  *
  * The enterprise host is a volatile config field: the Settings page writes it
  * into the profile's `cordis.patch.yml` through the settings service, and the
@@ -13,19 +13,18 @@
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 // Type-only: augment `Context` with `credentials`, `settings`, `connection`, and `fiber.entry`.
-import { credentialKey } from '@deepseek-ai/dsh-credentials'
+import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
-import { PI_AI_PROVIDER, PI_AI_RECORD_KEY, PI_AI_RECORD_SCOPE } from '../shared/contract.ts'
+import { BRIDGE_RECORD_KEY, PI_AI_PROVIDER } from '../shared/contract.ts'
 import { createAuthController, type AuthController, type BridgeConfig } from './auth-controller.ts'
 import { pollDeviceFlow, startDeviceFlow } from './device-flow.ts'
 import { createCopilotUsage } from './copilot-usage.ts'
 import { createCopilotMetadata } from './copilot-metadata.ts'
 import { authRoutes } from './routes.ts'
 import { filterModelSelection } from './model-selection.ts'
-import { ensureCopilotProvider } from './provider-setup.ts'
-import { grantToken } from './grant.ts'
+import { readBridgeAccount } from './bridge-credentials.ts'
 
 export const name = 'copilot-bridge'
 
@@ -99,17 +98,7 @@ export function apply(ctx: Context, config: Config): void {
   const auth = createAuthController({
     credentials: () => ctx.get('credentials'),
     config: bridgeConfig(ctx, config),
-    providerModelIds: async () => providerModelIds?.(),
-    ensureProvider: () => ensureCopilotProvider({
-      settings: () => ctx.get('settings'),
-      llm: () => ctx.get('llm'),
-      async refresh() {
-        const llm = ctx.get('llm')
-        if (llm === undefined) throw new Error('the LLM service is unavailable')
-        await llm.listModels(PI_AI_PROVIDER)
-        await ctx.parallel('llm/models-updated', PI_AI_PROVIDER)
-      },
-    }),
+    catalogIds: async () => providerModelIds?.(),
     startDeviceFlow,
     pollDeviceFlow,
     logger: {
@@ -119,10 +108,6 @@ export function apply(ctx: Context, config: Config): void {
     },
   })
   ctx.effect(() => () => auth.dispose(), `${name}: stop device-flow polling`)
-  const syncModels = () => { void auth.syncModels().catch(error => ctx.logger.warn(`${name}: model filtering failed: ${errorMessage(error)}`)) }
-  ctx.on('credentials/record-updated', key => { if (key === PI_AI_RECORD_KEY) syncModels() })
-  ctx.on('loader/volatile-update', paths => { if (paths.some(path => path[0] === 'hiddenModels')) syncModels() })
-  ctx.inject(['credentials'], () => { syncModels() })
   ctx.inject(['llm'], llmCtx => {
     const notify = () => {
       void llmCtx.parallel('llm/models-updated', PI_AI_PROVIDER)
@@ -135,10 +120,8 @@ export function apply(ctx: Context, config: Config): void {
       const original = runtime.listModels
       const fullCatalog = async () => (await original.call(runtime, PI_AI_PROVIDER)).map(model => model.id)
       providerModelIds = fullCatalog
-      const dispose = filterModelSelection(runtime, () => config.hiddenModels.get() ?? [], async () => {
-        const record = await llmCtx.get('credentials')?.readRecord(credentialKey(PI_AI_RECORD_SCOPE, PI_AI_PROVIDER))
-        return grantToken(record) !== undefined
-      })
+      const dispose = filterModelSelection(runtime, () => config.hiddenModels.get() ?? [],
+        async () => await readBridgeAccount(llmCtx.get('credentials')) !== undefined)
       return () => {
         if (providerModelIds === fullCatalog) providerModelIds = undefined
         dispose()
@@ -154,7 +137,7 @@ export function apply(ctx: Context, config: Config): void {
     // The adapter's static catalog does not change on logout. Explicitly
     // invalidate cached pickers when the grant changes, even with no hidden ids.
     llmCtx.effect(() => ctx.on('credentials/record-updated', key => {
-      if (key === PI_AI_RECORD_KEY) notify()
+      if (key === BRIDGE_RECORD_KEY) notify()
     }), `${name}: model selection credential updates`)
     llmCtx.inject(['credentials'], credentialsCtx => {
       notify()
