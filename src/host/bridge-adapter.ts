@@ -24,6 +24,7 @@ import { streamSimple as openaiResponses } from '@earendil-works/pi-ai/api/opena
 import { AccessTokenError, type AccessToken, type AccessTokens } from './access-token.ts'
 import type { CatalogProtocol, LiveCatalog, SupportedCatalogModel } from './live-catalog.ts'
 import { pinnedFirst } from './pinned-models.ts'
+import { COPILOT_EDITOR_HEADERS, COPILOT_USER_AGENT } from './copilot-headers.ts'
 
 export const BRIDGE_PROVIDER = 'copilot-bridge'
 export const BRIDGE_PROVIDER_NAME = 'GitHub Copilot Bridge'
@@ -64,10 +65,8 @@ const DEFAULT_TRANSPORTS: Record<CatalogProtocol, BridgeTransport> = {
 
 /** Static editor headers Copilot expects; pi-ai adds the dynamic ones (D7). */
 const COPILOT_HEADERS = {
-  'User-Agent': 'GitHubCopilotChat/0.35.0',
-  'Editor-Version': 'vscode/1.107.0',
-  'Editor-Plugin-Version': 'copilot-chat/0.35.0',
-  'Copilot-Integration-Id': 'vscode-chat',
+  'User-Agent': COPILOT_USER_AGENT,
+  ...COPILOT_EDITOR_HEADERS,
 }
 /** pi-ai thinking levels in ascending order; advertised efforts outside this set are dropped (D12). */
 const THINKING_LEVELS: readonly ThinkingLevel[] = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']

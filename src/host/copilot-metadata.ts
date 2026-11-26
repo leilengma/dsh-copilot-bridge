@@ -4,6 +4,7 @@ import { allowedBaseUrl, type AccessToken } from './access-token.ts'
 import type { CopilotModel, ModelPrices } from '../shared/contract.ts'
 import { readBridgeAccount } from './bridge-credentials.ts'
 import { githubFetch } from './transport.ts'
+import { COPILOT_EDITOR_HEADERS } from './copilot-headers.ts'
 
 export type CopilotMetadata = Pick<CopilotModel, 'pricing' | 'longContextPricing' | 'defaultContextMax' | 'promotion' | 'retiring'>
 type Metadata = ReadonlyMap<string, CopilotMetadata>
@@ -122,8 +123,7 @@ export function createCopilotMetadata(deps: {
           const response = await fetch(url, {
             headers: {
               Accept: 'application/json', Authorization: `Bearer ${token}`,
-              'Editor-Version': 'vscode/1.107.0',
-              'Editor-Plugin-Version': 'copilot-chat/0.35.0', 'Copilot-Integration-Id': 'vscode-chat',
+              ...COPILOT_EDITOR_HEADERS,
               'X-GitHub-Api-Version': '2026-06-01', ...attributionHeaders(),
             },
             redirect: 'error', signal: access.signal ? AbortSignal.any([access.signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000),
