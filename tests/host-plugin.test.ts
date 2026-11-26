@@ -32,10 +32,11 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean; hidden?: string[] } = {}) {
+function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean; hidden?: string[]; pinned?: string[] } = {}) {
   const ctx = new Context()
   const enterpriseUrl = createVolatile('')
   const hiddenModels = createVolatile(options.hidden ?? [])
+  const pinnedModels = createVolatile(options.pinned ?? [])
   const routes = new Map<string, ConnectionFetchRoute>()
   const records = new Map<string, CredentialRecord>([
     ['llm-pi-ai/github-copilot', { kind: 'api-key', key: 'native-user-owned' }],
@@ -88,15 +89,17 @@ function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean;
   }
   ctx.provide('settings', {
     configure() { return () => {} },
-    async update(_id: string, patch: { hiddenModels?: string[]; enterpriseUrl?: string }) {
+    async update(_id: string, patch: { hiddenModels?: string[]; pinnedModels?: string[]; enterpriseUrl?: string }) {
       settingWrites.push(patch)
       if (patch.hiddenModels) { updateVolatile(hiddenModels, createVolatile(patch.hiddenModels)); emitEdit('hiddenModels') }
+      if (patch.pinnedModels) { updateVolatile(pinnedModels, createVolatile(patch.pinnedModels)); emitEdit('pinnedModels') }
       if (patch.enterpriseUrl !== undefined) { updateVolatile(enterpriseUrl, createVolatile(patch.enterpriseUrl)); emitEdit('enterpriseUrl') }
     },
     async mutate(_id: string, operations: { path: string[] }[]) {
       settingWrites.push(operations)
       for (const { path } of operations) {
         if (path[0] === 'hiddenModels') updateVolatile(hiddenModels, createVolatile([]))
+        if (path[0] === 'pinnedModels') updateVolatile(pinnedModels, createVolatile([]))
         if (path[0] === 'enterpriseUrl') updateVolatile(enterpriseUrl, createVolatile(''))
         emitEdit(path[0]!)
       }
@@ -114,7 +117,7 @@ function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean;
   const mount = () => ctx.plugin({ apply(child: Context) {
     entry = child
     Object.defineProperty(child.fiber, 'entry', { value: { options: { id: 'bridge-fixture' } } })
-    apply(child, { enterpriseUrl, hiddenModels })
+    apply(child, { enterpriseUrl, hiddenModels, pinnedModels })
   } })
   const plugin = mount()
   t.after(async () => { await ctx.fiber.dispose() })
@@ -196,6 +199,33 @@ test('hide/reveal and all-hidden changes refresh only the bridge picker; routes 
   assert.deepEqual(ids(await h.runtime.listModels('github-copilot')), ['mai-code-2'])
   assert.equal(Object.hasOwn(h.runtime, 'listModels'), false)
   assert.deepEqual(h.credentialWrites, [])
+})
+
+test('pin route persists exact supported ids, deduplicates, rejects invalid input and unsets empty pins', async t => {
+  const h = host(t)
+  await h.picker()
+  const saved = await h.request('pinned-models', { pinnedModels: ['mai-code-2', 'gpt-6', 'mai-code-2'] })
+  assert.equal(saved.status, 200)
+  assert.equal(saved.envelope.ok, true)
+  assert.deepEqual(saved.envelope.value.pinnedModels, ['mai-code-2', 'gpt-6'])
+  assert.deepEqual((await h.request('status')).envelope.value.pinnedModels, ['mai-code-2', 'gpt-6'])
+  assert.deepEqual(h.settingWrites.at(-1), { pinnedModels: ['mai-code-2', 'gpt-6'] })
+  const writes = h.settingWrites.length
+  for (const body of [null, {}, [], { pinnedModels: null }, { pinnedModels: 'mai-code-2' },
+    { pinnedModels: [''] }, { pinnedModels: ['  '] }, { pinnedModels: [123] },
+    { pinnedModels: ['MAI-code-2'] }, { pinnedModels: [' mai-code-2 '] },
+    { pinnedModels: ['unknown'] }, { pinnedModels: ['claude-opus-5'] }, { pinnedModels: ['future-realtime'] }]) {
+    const invalid = await h.request('pinned-models', body)
+    assert.equal(invalid.status, 400)
+    assert.equal(invalid.envelope.ok, false)
+    assert.equal(typeof invalid.envelope.error, 'string')
+  }
+  assert.equal(h.settingWrites.length, writes, 'invalid pin requests cannot mutate settings')
+  assert.deepEqual((await h.request('status')).envelope.value.pinnedModels, ['mai-code-2', 'gpt-6'])
+  const cleared = await h.request('pinned-models', { pinnedModels: [] })
+  assert.equal(cleared.status, 200)
+  assert.deepEqual(cleared.envelope.value.pinnedModels, [])
+  assert.deepEqual(h.settingWrites.at(-1), [{ op: 'unset', path: ['pinnedModels'] }])
 })
 
 test('a failed initial discovery does not turn picker notifications into a retry loop; manual refresh recovers', async t => {
