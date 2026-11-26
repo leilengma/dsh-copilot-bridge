@@ -147,6 +147,7 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
 
   const schedulePoll = (device: DeviceAuthorization, abort: AbortController): void => {
     const current = generation
+    const active = () => current === generation && !disposed && !abort.signal.aborted
     const deadline = now() + device.expiresIn * 1000
     let interval = device.interval
     flow = { state: 'pending', verificationUri: device.verificationUri, userCode: device.userCode, expiresAt: deadline }
@@ -169,15 +170,18 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
             ? { token: result.token }
             : { token: result.token, enterpriseHost: device.domain }
           try {
-            await writeBridgeAccount(requireCredentials('signing in'), account)
+            await writeBridgeAccount(requireCredentials('signing in'), account, abort.signal)
           } catch (error) {
+            if (!active()) return
             finish('error', errorMessage(error))
             deps.logger.error(error)
             return
           }
+          if (!active()) return
           await resetHiddenModels()
+          if (!active()) return
           await resetPinnedModels()
-          if (current !== generation) return
+          if (!active()) return
           finish('authenticated')
           deps.logger.info(`GitHub Copilot sign-in at ${device.domain} completed`)
           await bestEffort('Sign-in follow-up failed', () => deps.onSignedIn?.(account))

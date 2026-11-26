@@ -345,6 +345,71 @@ for (const lifecycle of ['dispose', 'logout', 'host-switch'] as const) {
   })
 }
 
+for (const lifecycle of ['dispose', 'logout', 'host-switch'] as const) {
+  for (const replacement of [false, true]) {
+    test(`${lifecycle} before a queued credential mutation prevents stale sign-in${replacement ? ' without overwriting replacement account or preferences' : ''}`, async () => {
+      const h = harness()
+      let release!: () => void
+      const gate = new Promise<void>(resolve => { release = resolve })
+      const modify = h.credentials.modifyRecord.bind(h.credentials)
+      h.credentials.modifyRecord = async (key, update) => { await gate; return modify(key, update) }
+      await h.controller.login()
+      h.polls.push({ state: 'done', token: 'ghu_stale' })
+      await h.tick()
+      if (lifecycle === 'dispose') h.controller.dispose()
+      else if (lifecycle === 'logout') await h.controller.logout()
+      else await h.controller.setEnterpriseUrl('replacement.ghe.com')
+      if (replacement) signedInAs(h, { token: 'ghu_replacement' })
+      h.config.hidden = ['replacement-hidden']
+      h.config.pinned = ['replacement-pinned']
+      release()
+      await new Promise(resolve => setImmediate(resolve))
+      assert.deepEqual(h.credentials.records.get(BRIDGE), replacement
+        ? { kind: 'grant', payload: { token: 'ghu_replacement' } } : undefined)
+      assert.deepEqual(h.config.hidden, ['replacement-hidden'])
+      assert.deepEqual(h.config.pinned, ['replacement-pinned'])
+      assert.deepEqual(h.signedIn, [])
+    })
+  }
+}
+
+for (const boundary of ['credential-write', 'credential-readback', 'hidden-reset', 'pinned-reset'] as const) {
+  test(`cancellation during ${boundary} leaves replacement preferences and sign-in hook untouched`, async () => {
+    const h = harness()
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let waiting = false
+    const wait = async () => { waiting = true; await gate }
+    await h.controller.login()
+    if (boundary === 'credential-write') {
+      const modify = h.credentials.modifyRecord.bind(h.credentials)
+      h.credentials.modifyRecord = async (key, update) => { const result = await modify(key, update); await wait(); return result }
+    } else if (boundary === 'credential-readback') {
+      const read = h.credentials.readRecord.bind(h.credentials)
+      h.credentials.readRecord = async key => { const result = await read(key); await wait(); return result }
+    } else if (boundary === 'hidden-reset') {
+      const write = h.config.writeHidden.bind(h.config)
+      h.config.writeHidden = async ids => { await write(ids); await wait() }
+    } else {
+      const write = h.config.writePinned.bind(h.config)
+      h.config.writePinned = async ids => { await write(ids); await wait() }
+    }
+    h.polls.push({ state: 'done', token: 'ghu_cancelled' })
+    await h.tick()
+    assert.ok(waiting, `fixture must reach ${boundary} before cancellation`)
+    h.controller.dispose()
+    signedInAs(h, { token: 'ghu_replacement' })
+    h.config.hidden = ['replacement-hidden']
+    h.config.pinned = ['replacement-pinned']
+    release()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(h.credentials.records.get(BRIDGE), { kind: 'grant', payload: { token: 'ghu_replacement' } })
+    assert.deepEqual(h.config.hidden, ['replacement-hidden'])
+    assert.deepEqual(h.config.pinned, ['replacement-pinned'])
+    assert.deepEqual(h.signedIn, [])
+  })
+}
+
 test('changing the host cancels a pending device flow', async () => {
   const h = harness()
   await h.controller.login()

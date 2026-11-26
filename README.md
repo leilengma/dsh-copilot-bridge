@@ -110,6 +110,8 @@ ELECTRON_RUN_AS_NODE=1 '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSe
   '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules'
 ```
 
+Device-flow cancellation is checked inside the credential store's exclusive mutation callback and after write/readback and preference-reset awaits. A cancelled flow cannot enter a queued credential mutation or start further preference resets. The credential API has no commit-time cancellation: once the callback has admitted a write, cancellation during its disk persistence cannot revoke it. Serialized logout deletion follows that write; unload/host changes alone cannot promise rollback. Preference writes already handed to settings likewise cannot be revoked. The bridge never deletes or restores a record to compensate, which could overwrite a replacement account.
+
 Installed checks use in-memory fixtures, not desktop credentials or profiles. Deterministic tests and installed-runtime checks do not replace browser acceptance or authorize live inference; any live smoke test requires separate approval.
 
 For an isolated rendered Models test, run `node scripts/serve-client-ui-fixture.mjs` and open its localhost URL in a scratch browser tab. It uses production components/state with fake HTTP and semantic adapters for Harness presentation primitives. With that page owned by a Tabbit task, run `tabbit-cli nodejs --task <task> < tests/client-ui.browser.js` for keyboard pin/unpin, pending, failure/retry, hidden pins, order, filter and locale assertions. This does not exercise the installed desktop shell or the physical picker transport.
