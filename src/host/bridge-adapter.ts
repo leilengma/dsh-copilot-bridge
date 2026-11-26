@@ -72,6 +72,21 @@ interface BoundCall {
 }
 
 const capitalize = (value: string) => value.charAt(0).toUpperCase() + value.slice(1)
+const aborted = () => new LlmError('Copilot request aborted by caller', 'ABORTED')
+
+/** Cancel only this caller's wait, never the catalog's shared discovery. */
+function waitFor<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise
+  if (signal.aborted) return Promise.reject(aborted())
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => { signal.removeEventListener('abort', onAbort); reject(aborted()) }
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(value => { signal.removeEventListener('abort', onAbort); resolve(value) }, error => {
+      signal.removeEventListener('abort', onAbort)
+      reject(error)
+    })
+  })
+}
 
 /** Advertised efforts that pi-ai understands, in pi-ai order (never invented). */
 export function supportedEfforts(model: Pick<SupportedCatalogModel, 'reasoningEfforts'>): readonly ThinkingLevel[] {
@@ -255,6 +270,7 @@ async function toContext(options: GenerateOptions, model: SupportedCatalogModel,
 class ChunkMapper {
   private readonly toolIds = new Map<number, ToolCallId>()
   private blocks = 0
+  private malformedTool = false
 
   map(event: AssistantMessageEvent, aborted: () => boolean, status: () => number | undefined): StreamChunk[] {
     switch (event.type) {
@@ -283,6 +299,7 @@ class ChunkMapper {
         }]
       }
       case 'toolcall_end':
+        if (event.toolCall.argumentsError) { this.malformedTool = true; return [] }
         this.blocks++
         return [{
           type: 'block-end', index: event.contentIndex,
@@ -300,6 +317,9 @@ class ChunkMapper {
 
   private finish(message: PiAssistantMessage): { reason: FinishReason; replayState?: { response: unknown } } {
     if (message.stopReason === 'length') return { reason: { kind: 'max-tokens' }, replayState: { response: message } }
+    if (this.malformedTool) {
+      return { reason: { kind: 'error', failure: { message: 'Copilot returned malformed tool arguments', code: 'MALFORMED_RESPONSE' } } }
+    }
     if (message.stopReason === 'toolUse') return { reason: { kind: 'tool-calls' }, replayState: { response: message } }
     if (this.blocks === 0) {
       return { reason: { kind: 'error', failure: { message: 'Copilot returned an empty response', code: 'EMPTY_RESPONSE' } } }
@@ -334,19 +354,23 @@ export class BridgeAdapter extends LlmAdapter {
     return snapshot.models.flatMap(model => model.supported && !hidden.has(model.id) ? [modelInfo(model)] : [])
   }
 
-  override async resolveModel(_provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
-    return resolvedInfo(await this.supported(model))
+  override async resolveModel(_provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
+    return resolvedInfo((await this.supported(model, signal)).model)
   }
 
   override async prepareCall(_provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
-    const definition = await this.supported(model)
-    signal?.throwIfAborted()
+    const selected = await this.supported(model, signal)
+    const definition = selected.model
+    if (signal?.aborted) throw aborted()
     let token: AccessToken
     try {
       token = await this.deps.tokens.current(signal)
     } catch (error) {
       if (signal?.aborted) throw new LlmError('Copilot request aborted by caller', 'ABORTED')
       throw tokenError(error)
+    }
+    if (selected.generation !== token.generation) {
+      throw new LlmError('Copilot model catalog changed during preparation; retry the request', 'DISCOVERY_FAILED')
     }
     const bound: BoundCall = { model: definition, token, transport: this.transports[definition.protocol] }
     return { model: resolvedInfo(definition), stream: options => this.run(options, bound) }
@@ -357,16 +381,18 @@ export class BridgeAdapter extends LlmAdapter {
     yield* prepared.stream(options)
   }
 
-  private async supported(id: string): Promise<SupportedCatalogModel> {
+  private async supported(id: string, signal?: AbortSignal): Promise<{ model: SupportedCatalogModel; generation: number }> {
+    if (signal?.aborted) throw aborted()
     let snapshot
     try {
-      snapshot = await this.deps.catalog.ready()
+      snapshot = await waitFor(this.deps.catalog.ready(), signal)
     } catch (error) {
+      if (signal?.aborted) throw aborted()
       throw new LlmError('Copilot model catalog is unavailable', 'DISCOVERY_FAILED', { cause: error })
     }
     const model = snapshot.models.find(entry => entry.id === id)
     if (!model?.supported) throw new LlmError(`GitHub Copilot Bridge has no model "${id}"`, 'UNKNOWN_MODEL')
-    return model
+    return { model, generation: snapshot.generation }
   }
 
   private reasoning(options: GenerateOptions, model: SupportedCatalogModel): ThinkingLevel | undefined {
@@ -379,15 +405,17 @@ export class BridgeAdapter extends LlmAdapter {
   }
 
   private async *run(options: GenerateOptions, bound: BoundCall): AsyncGenerator<StreamChunk> {
+    options = { ...options, signal: options.signal ? AbortSignal.any([options.signal, bound.token.signal]) : bound.token.signal }
+    if (options.signal?.aborted) throw aborted()
     if (options.stop?.length) throw new LlmError('GitHub Copilot Bridge does not support GenerateOptions.stop', 'UNSUPPORTED_OPTION')
     const reasoning = this.reasoning(options, bound.model)
-    const context = await toContext(options, bound.model, this.deps)
+    const context = await waitFor(toContext(options, bound.model, this.deps), options.signal)
     const baseFetch = this.deps.fetch ?? globalThis.fetch
     let token = bound.token
     for (let attempt = 0; ; attempt++) {
       let status: number | undefined
       const fetch: typeof globalThis.fetch = async (input, init) => {
-        const response = await baseFetch(input, init)
+        const response = await baseFetch(input, { ...init, redirect: 'error' })
         status = response.status
         return response
       }
@@ -432,6 +460,9 @@ export class BridgeAdapter extends LlmAdapter {
       this.deps.tokens.invalidate(token)
       try {
         token = await this.deps.tokens.current(options.signal)
+        if (token.accountGeneration !== bound.token.accountGeneration) {
+          throw new LlmError('Copilot account changed; retry the request', 'AUTH')
+        }
       } catch (error) {
         throw tokenError(error)
       }

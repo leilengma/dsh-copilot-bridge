@@ -24,6 +24,10 @@ export interface AccessToken {
   readonly expiresAt: number
   /** Increments per exchanged token; differs across accounts, hosts and refreshes. */
   readonly generation: number
+  /** Stable across token refreshes, changes on reset or account/host replacement. */
+  readonly accountGeneration: number
+  /** Aborted when this account is reset, replaced or disposed (not on token refresh). */
+  readonly signal: AbortSignal
 }
 
 export type AccessTokenErrorReason =
@@ -120,6 +124,9 @@ export function createAccessTokens(deps: AccessTokenDeps): AccessTokens {
   let timer: unknown
   let epoch = 0
   let generation = 0
+  let accountGeneration = 0
+  let accountKey: string | undefined
+  let accountAbort = new AbortController()
   let exchanged = false
   let disposed = false
 
@@ -187,7 +194,10 @@ export function createAccessTokens(deps: AccessTokenDeps): AccessTokens {
       try {
         const result = await request(account, entry.controller.signal)
         if (inflight !== entry) throw new AccessTokenError('reset', 'Copilot token exchange was discarded')
-        const value: AccessToken = { token: result.token, baseUrl: result.baseUrl, expiresAt: result.expiresAt, generation: ++generation }
+        const value: AccessToken = {
+          token: result.token, baseUrl: result.baseUrl, expiresAt: result.expiresAt, generation: ++generation,
+          accountGeneration, signal: accountAbort.signal,
+        }
         cached = { key, value }
         schedule(Math.min(result.refreshMs, result.expiresAt - now() - EXPIRY_MARGIN_MS))
         const replacement = exchanged
@@ -234,6 +244,9 @@ export function createAccessTokens(deps: AccessTokenDeps): AccessTokens {
 
   function reset() {
     epoch++
+    accountAbort.abort(new Error('Copilot account changed'))
+    accountAbort = new AbortController()
+    accountKey = undefined
     inflight?.controller.abort()
     inflight = undefined
     cached = undefined
@@ -253,6 +266,12 @@ export function createAccessTokens(deps: AccessTokenDeps): AccessTokens {
         throw new AccessTokenError('signed-out', 'Not signed in to GitHub Copilot')
       }
       const key = keyOf(account)
+      if (accountKey !== key) {
+        accountAbort.abort(new Error('Copilot account changed'))
+        accountAbort = new AbortController()
+        accountKey = key
+        accountGeneration++
+      }
       if (cached?.key === key && cached.value.expiresAt - now() > EXPIRY_MARGIN_MS) return cached.value
       if (cached?.key !== key) {
         cached = undefined
