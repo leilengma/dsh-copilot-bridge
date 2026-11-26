@@ -252,6 +252,37 @@ test('pins stably lead bridge picker and management rows without revealing hidde
   assert.deepEqual(await h.picker(), supported)
 })
 
+test('discovery failures and catalog changes preserve saved pins while only supported live ids can be newly pinned', async t => {
+  const h = host(t, { pinned: ['missing-from-catalog', 'mai-code-2'] })
+  h.discover(async () => new Response('unavailable', { status: 503 }))
+  await h.picker()
+  const failed = (await h.request('models')).envelope.value
+  assert.equal(failed.state, 'error')
+  assert.deepEqual(failed.status.pinnedModels, ['missing-from-catalog', 'mai-code-2'])
+  assert.deepEqual(h.settingWrites, [], 'discovery cannot prune saved pins')
+  assert.equal((await h.request('pinned-models', { pinnedModels: ['mai-code-2', 'gpt-6'] })).status, 400)
+  const kept = await h.request('pinned-models', { pinnedModels: ['missing-from-catalog', 'mai-code-2', 'mai-code-2'] })
+  assert.equal(kept.status, 200)
+  assert.deepEqual(kept.envelope.value.pinnedModels, ['missing-from-catalog', 'mai-code-2'])
+  h.discover(async () => Response.json(modelsPayload))
+  await h.request('models/refresh', {})
+  const extended = await h.request('pinned-models', { pinnedModels: ['missing-from-catalog', 'mai-code-2', 'gpt-6'] })
+  assert.equal(extended.status, 200)
+  assert.deepEqual(extended.envelope.value.pinnedModels, ['missing-from-catalog', 'mai-code-2', 'gpt-6'])
+  h.discover(async () => new Response('unavailable', { status: 503 }))
+  const retryable = (await h.request('models/refresh', {})).envelope.value
+  assert.equal(retryable.state, 'error')
+  assert.deepEqual(retryable.status.pinnedModels, ['missing-from-catalog', 'mai-code-2', 'gpt-6'])
+  assert.deepEqual(await h.picker(), ['gpt-6', 'mai-code-2', 'claude-sonnet-5', 'grok-4.7', 'mai-code-2-flash', 'gemini-3-pro', 'kimi-k3'])
+  h.discover(async () => Response.json({ data: [] }))
+  const empty = (await h.request('models/refresh', {})).envelope.value
+  assert.deepEqual(empty.models, [])
+  assert.deepEqual(empty.status.pinnedModels, ['missing-from-catalog', 'mai-code-2', 'gpt-6'])
+  assert.equal((await h.request('pinned-models', { pinnedModels: ['mai-code-2', 'gpt-6'] })).status, 200)
+  assert.deepEqual((await h.request('status')).envelope.value.pinnedModels, ['mai-code-2', 'gpt-6'])
+  assert.equal((await h.request('pinned-models', { pinnedModels: ['kimi-k3'] })).status, 400)
+})
+
 test('a failed initial discovery does not turn picker notifications into a retry loop; manual refresh recovers', async t => {
   const h = host(t)
   const gate = deferred<Response>()

@@ -244,7 +244,9 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
     const pinned = validatePinnedModels(input)
     if (!deps.config.writable()) throw new Error('saving pinned models needs the settings service and a profile entry')
     const known = await catalogIds()
-    if (pinned.some(id => !known?.includes(id))) {
+    const saved = new Set(deps.config.readPinned())
+    // Catalog outages or removals must not erase saved preferences; only additions need live support.
+    if (pinned.some(id => !saved.has(id) && !known?.includes(id))) {
       throw new InvalidPinnedModelsError('pinnedModels contains an id not in the supported account model list')
     }
     await deps.config.writePinned(pinned.length === 0 ? undefined : pinned)
