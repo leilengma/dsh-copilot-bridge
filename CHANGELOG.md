@@ -2,31 +2,33 @@
 
 ## Unreleased
 
-- Populate Models immediately after provider setup using the full configured provider catalog until account-specific models are discovered. Label the fallback, keep hidden rows restorable, and give a known account catalog (including an empty one) precedence. Remove the redundant credential/model-picker hint from Account.
+## 1.0.0
 
-- Fix Copilot models remaining selectable after sign-out: gate the static Harness catalog on the saved sign-in credential, discard discovery responses that finish after logout, and refresh cached pickers on credential changes. Keep the provider configuration and restore models on a new sign-in; other providers are unchanged.
+### Added
 
-- After sign-in, detect an existing Harness `github-copilot` provider and create its native profile only when absent, then refresh model pickers. Preserve existing settings and retain the provider on sign-out. Read-only, concurrent-edit or setup failures keep the user signed in and show manual setup guidance with an OAuth-free retry; continue status polling until provider setup finishes.
+- Dedicated **GitHub Copilot** sidebar entry with a full-page **Account / Models** view and an **Open GitHub Copilot** shortcut in the installed plugin page.
+- Theme-aware Copilot artwork and English/Chinese plugin metadata and UI text.
+- Automatic native `github-copilot` provider setup after sign-in. Existing settings are preserved; read-only settings, concurrent edits and setup failures keep authentication valid and offer manual guidance and an OAuth-free retry.
+- Account credit usage with an accessible progress bar, exact values on hover/focus, provider reset time and manual refresh. Credentials and raw quota responses remain on the host.
+- Searchable model management with immediate-save eye toggles, context size, input capabilities, live credit prices, active discounts and informational **Retiring** warnings. Missing metadata is shown as **—**, never guessed.
+- Profile-level `hiddenModels` with live hand edits, exact-id matching, automatic pruning and re-filtering after provider refresh. Full model bookkeeping survives restarts so hidden rows remain restorable.
 
-- Add a GitHub Copilot sidebar entry that opens Account/Models in a full-page panel. Keep an **Open GitHub Copilot** shortcut in the installed plugin page instead of embedding the controls there.
+### Changed
 
-- Add the supplied GitHub Copilot plugin artwork, automatically rendered black in light mode and white in dark mode. Register an installed-bundle configuration shortcut so the plugin header uses package artwork rather than the official-settings fallback; export English and Chinese display metadata.
+- Move sign-in, status, sign-out and GitHub Enterprise host configuration to **GitHub Copilot → Account**. Host configuration is shown only while signed out; Models is available only while signed in.
+- Populate Models immediately after provider setup without requiring a chat request. Until the account catalog is discovered, show a labelled full provider catalog; known account catalogs, including an empty one, take precedence.
+- Reset hidden-model choices on every sign-out and completed sign-in. Provider configuration is retained on sign-out.
 
-- Remove the `/copilot-login`, `/copilot-status` and `/copilot-logout` chat commands, their composer device-code dialog and command UI hooks. Sign-in, status and sign-out remain available under **Plugins → GitHub Copilot → Account**.
+### Fixed
 
-- Show authenticated account credit usage below **Signed in at …**, with a progress bar, provider reset time, exact used/total on hover or keyboard focus, and a manual refresh icon. Refresh on opening Account and credential changes without polling; keep OAuth credentials and raw quota responses on the host. Remove the duplicate Account-tab title and hide GitHub host configuration while signed in.
+- Remove Copilot models from cached pickers on sign-out, discard discovery responses that finish after logout and restore models after a new sign-in. Other providers are unaffected.
+- Filter Harness 0.2.2-rc.5's static picker catalog as well as credential model ids. Refresh cached selectors on credential/configuration changes and restore the original service method on bridge unload.
+- Keep hidden models visible in the management table, including when every model is hidden, so they can be restored.
 
-- Consolidate GitHub Copilot under **Plugins → GitHub Copilot** with **Account** and **Models** tabs. Move authentication and Enterprise host configuration out of Settings; show Models only while signed in, and return to Account on sign-out. Update sign-in guidance in English and Chinese.
+### Removed
 
-- Enrich the Plugins model table with live Copilot credit prices (including long-context tiers), active discount badges and informational **Retiring** warnings. Read metadata host-side using the route-owned access token, with bounded caching, proxy support and fail-open missing data; model eligibility and visibility are unchanged.
-
-- Move model visibility from Settings into **Plugins → GitHub Copilot**: searchable model table with immediate-save eye toggles, context size and available input capabilities. Preserve hidden rows for restoration and show unavailable costs/metadata as **—**. Settings retains authentication and Enterprise host configuration.
-
-- Fix hidden Copilot models remaining visible in Harness 0.2.2-rc.5's static picker catalog: filter the advertised LLM listing as well as the grant, invalidate cached selectors on changes, and restore the service method on bridge unload. Add a regression check using the installed Harness adapter and LLM service.
-
-- Model visibility in **Settings → GitHub Copilot**: hide raw model ids with immediate-save checkboxes, a scrollable list, case-insensitive search, whole-account counts, and English/Chinese copy.
-- Profile-level `hiddenModels` configuration with live hand edits, exact-id matching, automatic pruning, and re-filtering after Copilot token refreshes. The full catalog is retained in credential bookkeeping across restarts.
-- Hidden choices reset on every sign-out and completed sign-in. The Models tab reports the hidden count. Hiding an active model or every model is allowed, with a warning in Settings.
+- **Breaking:** remove `/copilot-login`, `/copilot-status` and `/copilot-logout`, their composer device-code dialog and command UI hooks. Use **GitHub Copilot → Account** instead.
+- Remove the redundant credential/model-picker hint from Account.
 
 ## 0.1.0
 
