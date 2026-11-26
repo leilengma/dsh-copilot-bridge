@@ -225,11 +225,15 @@ export function createLiveCatalog(deps: LiveCatalogDeps): LiveCatalog {
   return {
     refresh,
     async ready() {
+      const started = epoch
       if (!inFlight && current) return current
       try {
-        return await refresh()
+        const snapshot = await refresh()
+        if (started !== epoch) throw cancelled()
+        return snapshot
       } catch (error) {
-        // A failed refresh is non-destructive: the last good snapshot stays usable.
+        // A failed refresh is non-destructive only within the same account/host epoch.
+        if (started !== epoch) throw cancelled()
         if (current) return current
         throw error
       }

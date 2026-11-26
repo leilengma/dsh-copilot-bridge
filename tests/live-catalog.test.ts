@@ -204,6 +204,24 @@ test('reset during an in-flight discovery aborts it and discards its late respon
   assert.deepEqual(catalog.state(), { status: 'loading' })
 })
 
+test('ready for the previous account rejects even when replacement discovery finishes before its late response', async () => {
+  const gate = deferred<Response>()
+  let first = true
+  const { catalog, setGeneration } = harness({ respond: async () => {
+    if (first) { first = false; return gate.promise }
+    return Response.json({ data: [] })
+  } })
+  const waiting = catalog.ready()
+  await new Promise(resolve => setImmediate(resolve))
+  catalog.reset()
+  setGeneration(2)
+  const replacement = await catalog.ready()
+  assert.equal(replacement.generation, 2)
+  gate.resolve(Response.json(modelsPayload))
+  await assert.rejects(waiting, /cancelled/)
+  assert.equal(catalog.snapshot(), replacement)
+})
+
 test('reset drops the previous snapshot so a new account never sees it', async () => {
   const { catalog, calls, setGeneration } = harness()
   await catalog.refresh()

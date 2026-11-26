@@ -343,6 +343,42 @@ test('composed vision uses verified Harness attachment bytes, and never advertis
   assert.deepEqual((await h.runtime.resolveModelInfo(BRIDGE_PROVIDER, 'gemini-3-pro')).inputModalities, ['text'])
 })
 
+test('preparation awaiting old discovery cannot bind the replacement account after its snapshot is ready', async t => {
+  const h = host(t)
+  const gate = deferred<Response>()
+  h.discover(() => gate.promise)
+  await settle()
+  const pending = h.runtime.prepareCall({ provider: BRIDGE_PROVIDER, model: 'mai-code-2' })
+  const rejected = assert.rejects(pending, { code: 'DISCOVERY_FAILED' })
+  await settle()
+  h.discover(async () => Response.json(modelsPayload))
+  h.setAccount(account('replacement-account'))
+  assert.deepEqual(await h.picker(), supported)
+  const before = h.requests.length
+  gate.resolve(Response.json(modelsPayload))
+  await rejected
+  assert.equal(h.requests.length, before, 'stale preparation must not exchange a token or send inference')
+})
+
+test('account change queued after discovery publication rejects the waiting host resolution', async t => {
+  const h = host(t)
+  const gate = deferred<Response>()
+  h.discover(() => gate.promise)
+  await settle()
+  const pending = h.runtime.resolveModelInfo(BRIDGE_PROVIDER, 'mai-code-2')
+  const rejected = assert.rejects(pending, { code: 'DISCOVERY_FAILED' })
+  let changed = false
+  h.ctx.on('llm/models-updated', () => {
+    if (changed) return
+    changed = true
+    // Account events can arrive after the catalog has fulfilled readiness,
+    // but before its host caller resumes from that await.
+    queueMicrotask(() => { queueMicrotask(() => h.setAccount(account('replacement-account'))) })
+  })
+  gate.resolve(Response.json(modelsPayload))
+  await rejected
+})
+
 test('account reset cancels an already prepared call and active inference without sending to a new account', async t => {
   const h = host(t)
   await h.picker()

@@ -166,7 +166,9 @@ export function apply(ctx: Context, config: Config): void {
         const state = catalog.state()
         // Picker refetches triggered by the error notification are not retry actions.
         if (state.status === 'error' && catalog.snapshot() === undefined) throw new Error(state.error)
-        return catalog.ready()
+        const snapshot = await catalog.ready()
+        if (started !== epoch || disposed) throw new Error('Copilot account changed')
+        return snapshot
       } },
       tokens, hidden: () => configStore.readHidden(),
       get loadImage() {
