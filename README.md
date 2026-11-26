@@ -2,7 +2,7 @@
 
 GitHub Copilot sign-in for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), on github.com **or a GitHub Enterprise host** such as `https://<company>.ghe.com/`.
 
-It provides an **Account** tab under **Plugins → GitHub Copilot** and commands for sign-in, with a **GitHub host** field: you enter your Enterprise URL, click **Save**, and the plugin writes it to the profile's configuration file.
+It provides an **Account** tab under **Plugins → GitHub Copilot** for sign-in, with a **GitHub host** field: you enter your Enterprise URL, click **Save**, and the plugin writes it to the profile's configuration file.
 
 The plugin handles sign-in and model visibility. It runs the OAuth device flow against the configured host and stores the long-lived credential in the Harness credential store under `llm-pi-ai` / `github-copilot`, together with `enterpriseUrl` when a host is set. The built-in `github-copilot` model route reads that record, refreshes short-lived Copilot tokens from `api.<host>`, and lists the models available to your account.
 
@@ -29,7 +29,7 @@ The Plugins table includes context size and input capabilities from Harness meta
 
 Missing metadata is shown as **—**, never guessed or treated as zero. Live metadata requires a valid short-lived access token from the built-in Copilot route; make a Copilot request first if needed. Metadata failures do not block model management. There are no Add Models or Install Model Providers actions. The **Account** tab contains authentication and the Enterprise host; **Models** contains search, visibility and pricing. There is no separate GitHub Copilot Settings section.
 
-The `/copilot-login`, `/copilot-status` and `/copilot-logout` commands work on chat surfaces too. Status includes the hidden count when nonzero.
+Sign-in, status and sign-out are available on **Plugins → GitHub Copilot → Account**, not through chat commands.
 
 To switch GitHub hosts, open **Plugins → GitHub Copilot → Account**, sign out, choose and save the new **GitHub host**, then sign in again. The host section is hidden while signed in.
 
@@ -74,8 +74,8 @@ npm ci
 npm run check        # tsc --noEmit, esbuild bundle to lib/, node --test (type-stripped .ts)
 ```
 
-- `src/host/`: Host plugin. Device flow, auth controller, credential grant, model-selection compatibility filter, `/api/copilot-bridge/*` routes, commands and config writes.
-- `src/client/`: Plugins Account/Models tabs, login dialog and logout confirmation.
+- `src/host/`: Host plugin. Device flow, auth controller, credential grant, model-selection compatibility filter, `/api/copilot-bridge/*` routes and config writes.
+- `src/client/`: Plugins Account/Models tabs, including device-code sign-in and sign-out confirmation on Account.
 - Authenticated `GET /api/copilot-bridge/models` returns the full account model list plus display-only metadata, including hidden models; it never includes credential payloads or uses the filtered picker list.
 - `src/host/copilot-metadata.ts` reuses the built-in route's access token for a host-only `/models` request. It never exchanges tokens or writes credentials. Requests use the shared proxy-aware transport, a 5-second timeout and no redirects. A single-flight, token/host-scoped in-memory cache lasts up to 5 minutes (bounded by token/promotion expiry); transport failures are retried on a later read after at most 30 seconds. Only allowlisted billing/warning fields for already-eligible ids reach the client. Copilot API fields follow [the official catalog schema](https://github.com/microsoft/vscode/blob/main/extensions/copilot/src/platform/endpoint/common/endpointProvider.ts) and [VS Code's badge semantics](https://github.com/microsoft/vscode/blob/main/src/vs/workbench/contrib/chat/browser/widget/input/modelPicker/modelPickerBadges.ts).
 - `src/shared/contract.ts`: request and response types shared by the Host and the client.

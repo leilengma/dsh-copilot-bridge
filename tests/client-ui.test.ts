@@ -17,14 +17,16 @@ const compiled = buildSync({
     import { CopilotPluginTabs } from './src/client/plugin-page.tsx'
     import { ModelsTable } from './src/client/hidden-models-card.tsx'
     import { UsageDisplay } from './src/client/account-usage.tsx'
-    import { apply } from './src/client/index.tsx'
+    import { apply, inject } from './src/client/index.tsx'
+    export const injections = inject
+    export const commandHooks = []
     import { authRevision } from './src/client/store.ts'
     const slots = []
     const remoteListeners = new Map()
     apply({
       locale: { register: () => () => {}, getSnapshot: () => ({ active: 'en', revision: 0 }), subscribe: () => () => {} },
-      effect: f => f(), on: () => () => {}, remote: { $on: (event, listener) => { remoteListeners.set(event, listener); return () => remoteListeners.delete(event) } },
-      commandUi: { decorate: () => () => {} }, sessions: {},
+      effect: f => f(), on: event => { commandHooks.push(event); return () => {} }, remote: { $on: (event, listener) => { remoteListeners.set(event, listener); return () => remoteListeners.delete(event) } },
+      commandUi: { decorate: decoration => { commandHooks.push(decoration.name); return () => {} } }, sessions: {},
       slots: { inject: (_name, f) => f(), register: (slot, component) => { slots.push({slot, component}); return () => {} } },
     })
     export const registrations = slots.map(({slot}) => ({ name: slot.name, id: slot.id, label: slot.label?.() }))
@@ -45,6 +47,8 @@ const bundled = { exports: {} }
 new Function('require', 'module', 'exports', compiled.text)(createRequire(import.meta.url), bundled, bundled.exports)
 const ui = bundled.exports as {
   registrations: { name: string; id: string; label?: string }[]
+  injections: string[]
+  commandHooks: string[]
   summary: string
   getRevision: () => number
   subscribeToRevision: (listener: () => void) => () => void
@@ -81,6 +85,13 @@ test('usage exposes exact credits on focus/hover, accessible progress and manual
   assert.doesNotMatch(unlimited, /0%|role="progressbar"/)
 })
 
+test('client has no chat command hooks, session dependencies, or composer login overlay', () => {
+  assert.deepEqual(ui.commandHooks, [])
+  assert.equal(ui.injections.includes('commandUi'), false)
+  assert.equal(ui.injections.includes('sessions'), false)
+  assert.equal(ui.registrations.some(slot => slot.name === 'conversation.input.overlay'), false)
+})
+
 test('client registers GitHub Copilot only inside Plugins, not a separate Settings section', () => {
   assert.deepEqual(ui.registrations.find(slot => slot.name === 'plugins.item'), { name: 'plugins.item', id: 'copilot-bridge-models', label: 'GitHub Copilot' })
   assert.equal(ui.registrations.some(slot => slot.name === 'settings.section' && slot.id === 'copilot-bridge'), false)
@@ -96,6 +107,7 @@ test('Account owns sign-in and host controls; Models is absent until authenticat
     assert.match(html, /role="tab"[^>]*aria-selected="true"[^>]*>Account</)
     assert.doesNotMatch(html, />Models<|Loading models|<table/)
     assert.match(html, /GitHub Enterprise URL/)
+    assert.doesNotMatch(html, /\/copilot-(login|status|logout)/)
     assert.doesNotMatch(html, /aria-label="Account usage"/)
   }
   const html = ui.renderTabs({ status, tab: 'account', onTabChange: () => {}, onStatusChange: () => {} })
@@ -164,6 +176,12 @@ test('account discovery notifies model-page subscribers but unrelated records do
     assert.equal(ui.getRevision(), before + 1)
     assert.equal(notifications, 1)
   } finally { unsubscribe() }
+})
+
+test('credential reference changes still refresh Account subscribers without chat integration', () => {
+  const before = ui.getRevision()
+  ui.emitRemote('credentials/reference-updated', 'llm-pi-ai/github-copilot')
+  assert.equal(ui.getRevision(), before + 1)
 })
 
 test('busy and read-only model tables disable every visibility mutation', () => {

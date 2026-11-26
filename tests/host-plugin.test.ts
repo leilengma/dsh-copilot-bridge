@@ -25,6 +25,28 @@ class StaticCatalog extends LlmAdapter {
   override async *stream() { throw new Error('test must not make model requests') }
 }
 
+test('Host exposes account routes without registering chat authentication commands', async () => {
+  const ctx = new Context()
+  const commands: string[] = []
+  const routes = new Set<string>()
+  ctx.provide('commands', { register(command: { name: string }) {
+    commands.push(command.name)
+    return () => {}
+  } })
+  ctx.provide('connection', { fetch: { register(route: ConnectionFetchRoute) {
+    routes.add(route.path)
+    return async () => { routes.delete(route.path) }
+  } } })
+  try {
+    apply(ctx, { enterpriseUrl: createVolatile(''), hiddenModels: createVolatile([]) })
+    await settle()
+    assert.deepEqual(commands, [])
+    for (const action of ['login', 'status', 'logout']) {
+      assert.ok(routes.has(`/api/copilot-bridge/${action}`), `${action} must remain available on the Account tab`)
+    }
+  } finally { await ctx.fiber.dispose() }
+})
+
 test('the actual LLM catalog boundary hides models even when the adapter ignores credentials', async () => {
   const ctx = new Context()
   const hiddenModels = createVolatile(['a'])

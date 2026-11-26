@@ -175,7 +175,6 @@ export function CopilotAccount({ status, onStatusChange, active }: {
           : null}
       </div>
 
-      <p style={css.hint}>{text('commandHint')}</p>
       <p style={css.hint}>
         {text('pluginVersion')}{' '}
         <a href={`${REPOSITORY}/releases/tag/v${__PLUGIN_VERSION__}`} target="_blank" rel="noreferrer" style={css.versionLink}>

@@ -12,13 +12,12 @@
  */
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import type { CommandResult } from '@deepseek-ai/dsh-commands'
-// Type-only: augment `Context` with `credentials`, `settings`, `connection`, `commands`, and `fiber.entry`.
+// Type-only: augment `Context` with `credentials`, `settings`, `connection`, and `fiber.entry`.
 import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
-import { PI_AI_PROVIDER, PI_AI_RECORD_KEY, type AuthStatus } from '../shared/contract.ts'
+import { PI_AI_PROVIDER, PI_AI_RECORD_KEY } from '../shared/contract.ts'
 import { createAuthController, type AuthController, type BridgeConfig } from './auth-controller.ts'
 import { pollDeviceFlow, startDeviceFlow } from './device-flow.ts'
 import { createCopilotUsage } from './copilot-usage.ts'
@@ -28,7 +27,7 @@ import { filterModelSelection } from './model-selection.ts'
 
 export const name = 'copilot-bridge'
 
-/** No hard inject: `credentials`, `settings`, `connection`, and `commands` are optional and resolved when present. */
+/** No hard inject: `credentials`, `settings`, and `connection` are optional and resolved when present. */
 export const inject: string[] = []
 
 export interface Config {
@@ -93,74 +92,6 @@ function registerRoutes(ctx: Context, auth: AuthController): void {
   })
 }
 
-function loginText(status: AuthStatus): string {
-  if (status.authenticated) return 'GitHub Copilot is already authenticated. Run /copilot-status for details.'
-  return [
-    `GitHub Copilot sign-in (${status.githubHost})`,
-    `1. Open this URL in your browser: ${status.verificationUri ?? ''}`,
-    `2. Enter this code: ${status.userCode ?? ''}`,
-    '3. Authorize the GitHub App (VS Code) and complete sign-in.',
-    '',
-    'Polling continues in the background; the credential is stored once you authorize.',
-    `Then select a model under the "${PI_AI_PROVIDER}" provider in Settings → Models.`,
-  ].join('\n')
-}
-
-function statusText(status: AuthStatus): string {
-  if (!status.authenticated) {
-    return `GitHub Copilot is NOT signed in (host: ${status.githubHost}). Run /copilot-login to sign in.`
-  }
-  return [
-    `GitHub Copilot: authenticated at ${status.signedInHost ?? status.githubHost}.`,
-    ...status.signedInHost === undefined ? [] : [
-      `The configured host is now ${status.githubHost}; run /copilot-logout and /copilot-login to switch.`,
-    ],
-    `Credential published to the "${status.provider}" provider.`,
-    status.modelCount === undefined
-      ? 'The model list is populated by that provider on its first request.'
-      : `Models available to this account: ${status.modelCount}`,
-    ...(status.hiddenModels?.length ? [`Hidden from model selection: ${status.hiddenModels.length}`] : []),
-  ].join('\n')
-}
-
-function registerCommands(ctx: Context, auth: AuthController): void {
-  const run = (render: () => Promise<string>) => async (): Promise<CommandResult> => {
-    try {
-      return { kind: 'success', text: await render() }
-    } catch (error) {
-      return { kind: 'error', text: errorMessage(error) }
-    }
-  }
-  ctx.inject(['commands'], commandsCtx => {
-    commandsCtx.effect(() => {
-      const disposers = [
-        commandsCtx.commands.register({
-          name: 'copilot-login',
-          description: 'Sign in to GitHub Copilot via the device flow',
-          handler: run(async () => loginText(await auth.login())),
-        }),
-        commandsCtx.commands.register({
-          name: 'copilot-status',
-          description: 'Show GitHub Copilot authentication status',
-          handler: run(async () => statusText(await auth.status())),
-        }),
-        commandsCtx.commands.register({
-          name: 'copilot-logout',
-          description: 'Sign out of GitHub Copilot and remove the stored credential',
-          handler: run(async () => {
-            const wasSignedIn = (await auth.status()).authenticated
-            await auth.logout()
-            return wasSignedIn
-              ? `GitHub Copilot signed out; the "${PI_AI_PROVIDER}" credential has been removed.`
-              : 'GitHub Copilot is not signed in. Nothing to do.'
-          }),
-        }),
-      ]
-      return () => { for (const dispose of disposers.reverse()) dispose() }
-    }, `${name}: slash commands`)
-  })
-}
-
 export function apply(ctx: Context, config: Config): void {
   const auth = createAuthController({
     credentials: () => ctx.get('credentials'),
@@ -201,5 +132,4 @@ export function apply(ctx: Context, config: Config): void {
   })
 
   registerRoutes(ctx, auth)
-  registerCommands(ctx, auth)
 }
