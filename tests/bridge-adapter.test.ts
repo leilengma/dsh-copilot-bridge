@@ -6,7 +6,7 @@ import type { AssistantMessageEvent } from '@earendil-works/pi-ai'
 import { BridgeAdapter, type BridgeAdapterDeps, type BridgeTransport } from '../src/host/bridge-adapter.ts'
 import type { AccessToken } from '../src/host/access-token.ts'
 import { projectCatalog, type CatalogSnapshot } from '../src/host/live-catalog.ts'
-import { modelsPayload } from './fixtures/copilot-models.ts'
+import { anthropicThinkingPayload, modelsPayload, opus55Payload } from './fixtures/copilot-models.ts'
 
 const BASE = 'https://api.enterprise.githubcopilot.com'
 const snapshot: CatalogSnapshot = { generation: 1, models: projectCatalog(modelsPayload) }
@@ -193,7 +193,27 @@ test('mai-code-2 streams over the Responses endpoint with Copilot auth, attribut
   assert.deepEqual(finishOf(chunks), { kind: 'stop' })
 })
 
-test('Claude streams over Anthropic Messages with Bearer auth and budget thinking for the effort', async () => {
+test('Opus 5.5 without an effort uses adaptive thinking and the server default effort', async () => {
+  const http = fakeFetch(init => {
+    const body = JSON.parse(String(init?.body))
+    return body.thinking?.type === 'adaptive'
+      ? sse(anthropicText('ok'))()
+      : httpError(400, '"thinking.type.disabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.')()
+  })
+  const { instance } = adapter({
+    fetch: http.fetch,
+    catalog: { ready: async () => ({ generation: 1, models: projectCatalog(opus55Payload) }) },
+  })
+  const chunks = await collect(instance.stream(request('claude-opus-5.5')))
+  const [sent] = http.requests
+  assert.equal(sent?.url.split('?')[0], `${BASE}/v1/messages`)
+  assert.equal(sent.body.model, 'claude-opus-5.5')
+  assert.deepEqual(sent.body.thinking, { type: 'adaptive', display: 'summarized' })
+  assert.equal(sent.body.output_config, undefined, 'no invented effort: use the upstream model default')
+  assert.deepEqual(finishOf(chunks), { kind: 'stop' })
+})
+
+test('Sonnet 5 streams over Anthropic Messages with Bearer auth and adaptive effort', async () => {
   const http = fakeFetch(sse(anthropicText('Done', 'pondering')))
   const { instance } = adapter({ fetch: http.fetch })
   const chunks = await collect(instance.stream(request('claude-sonnet-5', { reasoningEffort: ReasoningEffortId('medium') })))
@@ -205,13 +225,127 @@ test('Claude streams over Anthropic Messages with Bearer auth and budget thinkin
   assert.equal(sent.headers.get('x-api-key'), null)
   assert.equal(sent.headers.get('x-initiator'), 'user')
   assert.equal(sent.headers.get('user-agent'), attributionHeaders()['user-agent'])
-  assert.equal((sent.body.thinking as { type?: string } | undefined)?.type, 'enabled')
+  assert.deepEqual(sent.body.thinking, { type: 'adaptive', display: 'summarized' })
+  assert.deepEqual(sent.body.output_config, { effort: 'medium' })
   assert.ok(chunks.some(chunk => chunk.type === 'reasoning-delta' && chunk.text === 'pondering'))
   assert.deepEqual(blockEnds(chunks), [{ type: 'reasoning', text: 'pondering' }, { type: 'text', text: 'Done' }])
   assert.deepEqual(finishOf(chunks), { kind: 'stop' })
 })
 
-test('Claude without an effort disables thinking', async () => {
+test('known Copilot adaptive models use every advertised effort, rejecting unadvertised levels before HTTP', async () => {
+  const models = projectCatalog(anthropicThinkingPayload).filter(model => model.id !== 'claude-haiku-4.5')
+  for (const model of models) {
+    const http = fakeFetch(...model.reasoningEfforts.map(() => sse(anthropicText('ok'))))
+    const { instance } = adapter({ fetch: http.fetch, catalog: { ready: async () => ({ generation: 1, models: [model] }) } })
+    const prepared = await instance.prepareCall('copilot-bridge', model.id)
+    assert.deepEqual(prepared.model.reasoning?.efforts.map(effort => String(effort.id)), model.reasoningEfforts)
+    for (const effort of model.reasoningEfforts) {
+      const chunks = await collect(prepared.stream(request(model.id, { reasoningEffort: ReasoningEffortId(effort) })))
+      const sent = http.requests.at(-1)!
+      assert.deepEqual(sent.body.thinking, { type: 'adaptive', display: 'summarized' }, `${model.id}/${effort}`)
+      assert.deepEqual(sent.body.output_config, { effort })
+      assert.equal(sent.body.model, model.id)
+      assert.ok(!(sent.headers.get('anthropic-beta') ?? '').includes('thinking-binding'))
+      assert.ok(!(sent.headers.get('anthropic-beta') ?? '').includes('output-config'))
+      assert.deepEqual(finishOf(chunks), { kind: 'stop' })
+    }
+    await assert.rejects(collect(prepared.stream(request(model.id, { reasoningEffort: ReasoningEffortId('minimal') }))), { code: 'UNSUPPORTED_REASONING_EFFORT' })
+    assert.equal(http.requests.length, model.reasoningEfforts.length, 'unsupported effort never reaches HTTP')
+  }
+})
+
+test('always-adaptive models keep the upstream default even without advertised efforts', async () => {
+  for (const id of ['claude-opus-5.5', 'claude-sonnet-5.5', 'claude-fable-5', 'claude-fable-5.1']) {
+    for (const efforts of [['low', 'medium', 'high'], []]) {
+      const source = anthropicThinkingPayload.data.find(model => model.id === id)!
+      const models = projectCatalog({ data: [{ ...source, capabilities: { ...source.capabilities, supports: { reasoning_effort: efforts } } }] })
+      const http = fakeFetch(sse(anthropicText('ok')))
+      const { instance } = adapter({ fetch: http.fetch, catalog: { ready: async () => ({ generation: 1, models }) } })
+      const prepared = await instance.prepareCall('copilot-bridge', id)
+      if (efforts.length === 0) assert.equal(prepared.model.reasoning, undefined)
+      const chunks = await collect(prepared.stream(request(id, { maxTokens: 1234, temperature: 0.4 })))
+      const sent = http.requests[0]!
+      assert.deepEqual(sent.body.thinking, { type: 'adaptive', display: 'summarized' }, id)
+      assert.equal(sent.body.output_config, undefined)
+      assert.equal(sent.body.max_tokens, 1234)
+      assert.equal(sent.body.temperature, undefined, 'adaptive thinking does not accept sampling temperature')
+      assert.equal(sent.redirect, 'error')
+      assert.equal(sent.headers.get('authorization'), 'Bearer tok-1')
+      assert.equal(sent.headers.get('user-agent'), attributionHeaders()['user-agent'])
+      assert.deepEqual(finishOf(chunks), { kind: 'stop' })
+      await assert.rejects(collect(prepared.stream(request(id, { reasoningEffort: ReasoningEffortId('max') }))), { code: 'UNSUPPORTED_REASONING_EFFORT' })
+      assert.equal(http.requests.length, 1)
+    }
+  }
+})
+
+test('genuine legacy Haiku retains budget thinking and no-effort off behavior', async () => {
+  const models = projectCatalog(anthropicThinkingPayload).filter(model => model.id === 'claude-haiku-4.5')
+  const http = fakeFetch(sse(anthropicText('ok')), sse(anthropicText('ok')))
+  const { instance } = adapter({ fetch: http.fetch, catalog: { ready: async () => ({ generation: 1, models }) } })
+  await collect(instance.stream(request('claude-haiku-4.5', { reasoningEffort: ReasoningEffortId('medium') })))
+  assert.deepEqual(http.requests[0]?.body.thinking, { type: 'enabled', budget_tokens: 8192, display: 'summarized' })
+  assert.equal(http.requests[0]?.body.output_config, undefined)
+  await collect(instance.stream(request('claude-haiku-4.5')))
+  assert.deepEqual(http.requests[1]?.body.thinking, { type: 'disabled' })
+})
+
+test('adaptive compatibility never selects a protocol by model name or applies to unknown Messages models', async () => {
+  const source = opus55Payload.data[0]!
+  const models = projectCatalog({ data: [
+    { ...source, supported_endpoints: ['/responses'] },
+    { ...source, id: 'claude-future', supported_endpoints: ['/v1/messages'] },
+  ] })
+  const http = fakeFetch(sse(responsesText('ok')), sse(anthropicText('ok')))
+  const { instance } = adapter({ fetch: http.fetch, catalog: { ready: async () => ({ generation: 1, models }) } })
+  await collect(instance.stream(request('claude-opus-5.5', { reasoningEffort: ReasoningEffortId('high') })))
+  assert.equal(http.requests[0]?.url, `${BASE}/responses`)
+  assert.deepEqual(http.requests[0]?.body.reasoning, { effort: 'high', summary: 'auto' })
+  assert.equal(http.requests[0]?.body.thinking, undefined)
+  await collect(instance.stream(request('claude-future', { reasoningEffort: ReasoningEffortId('medium') })))
+  assert.equal((http.requests[1]?.body.thinking as { type: string }).type, 'enabled')
+})
+
+test('adaptive default requests retain abort, 401 refresh and injected transport seams', async () => {
+  const catalog = { ready: async () => ({ generation: 1, models: projectCatalog(opus55Payload) }) }
+  const http = fakeFetch(httpError(401, 'expired'), sse(anthropicText('ok')))
+  const { instance, tokens } = adapter({ fetch: http.fetch, catalog })
+  const prepared = await instance.prepareCall('copilot-bridge', 'claude-opus-5.5')
+  const chunks = await collect(prepared.stream(request('claude-opus-5.5')))
+  assert.deepEqual(finishOf(chunks), { kind: 'stop' })
+  assert.deepEqual(tokens.invalidated, [1])
+  assert.deepEqual(http.requests.map(sent => sent.headers.get('authorization')), ['Bearer tok-1', 'Bearer tok-2'])
+  assert.ok(http.requests.every(sent => (sent.body.thinking as { type: string }).type === 'adaptive'))
+
+  const controller = new AbortController()
+  const pending = fakeFetch(init => {
+    const body = new ReadableStream<Uint8Array>({
+      start(stream) {
+        stream.enqueue(encoder.encode(sseText(anthropicText('slow').slice(0, 3))))
+        init?.signal?.addEventListener('abort', () => stream.error(init.signal?.reason))
+      },
+    })
+    return new Response(body, { headers: { 'content-type': 'text/event-stream' } })
+  })
+  const aborting = adapter({ catalog, fetch: pending.fetch }).instance
+  const received: StreamChunk[] = []
+  for await (const chunk of aborting.stream(request('claude-opus-5.5', { signal: controller.signal }))) {
+    received.push(chunk)
+    if (chunk.type === 'text-delta') controller.abort()
+  }
+  assert.equal(finishOf(received).kind, 'aborted')
+
+  let injected = false
+  const custom: BridgeTransport = async function* (model) {
+    injected = model.id === 'claude-opus-5.5'
+    throw new Error('injected transport')
+  }
+  const overriding = adapter({ catalog, transports: { 'anthropic-messages': custom } }).instance
+  await assert.rejects(collect(overriding.stream(request('claude-opus-5.5'))), /injected transport/)
+  assert.ok(injected)
+})
+
+test('Sonnet 5 without an effort retains supported disabled thinking', async () => {
   const http = fakeFetch(sse(anthropicText('ok')))
   const { instance } = adapter({ fetch: http.fetch })
   await collect(instance.stream(request('claude-sonnet-5')))

@@ -18,7 +18,7 @@ import type {
   AssistantMessage as PiAssistantMessage, AssistantMessageEvent, ImageContent, Message as PiMessage, Model, SimpleStreamOptions,
   TextContent, ThinkingLevel, Tool, ToolCall, TranscriptContext, Usage,
 } from '@earendil-works/pi-ai'
-import { streamSimple as anthropicMessages } from '@earendil-works/pi-ai/api/anthropic-messages'
+import { stream as anthropicMessages, streamSimple as anthropicMessagesSimple } from '@earendil-works/pi-ai/api/anthropic-messages'
 import { streamSimple as openaiCompletions } from '@earendil-works/pi-ai/api/openai-completions'
 import { streamSimple as openaiResponses } from '@earendil-works/pi-ai/api/openai-responses'
 import { AccessTokenError, type AccessToken, type AccessTokens } from './access-token.ts'
@@ -28,7 +28,7 @@ import { pinnedFirst } from './pinned-models.ts'
 export const BRIDGE_PROVIDER = 'copilot-bridge'
 export const BRIDGE_PROVIDER_NAME = 'GitHub Copilot Bridge'
 
-/** One pi-ai `streamSimple` function per protocol. */
+/** One public pi-ai transport per protocol, accepting the shared simple options. */
 export type BridgeTransport = (
   model: Model<CatalogProtocol>, context: TranscriptContext, options: SimpleStreamOptions,
 ) => AsyncIterable<AssistantMessageEvent>
@@ -50,7 +50,14 @@ export interface BridgeAdapterDeps {
 }
 
 const DEFAULT_TRANSPORTS: Record<CatalogProtocol, BridgeTransport> = {
-  'anthropic-messages': anthropicMessages as BridgeTransport,
+  'anthropic-messages': (model, context, options) => {
+    const anthropicModel = model as Model<'anthropic-messages'>
+    // streamSimple unconditionally sends disabled when reasoning is absent.
+    // Always-on models need stream's explicit adaptive switch, without an invented effort.
+    return options.reasoning === undefined && ANTHROPIC_THINKING_POLICY[model.id] === 'always-adaptive'
+      ? anthropicMessages(anthropicModel, context, { ...options, thinkingEnabled: true })
+      : anthropicMessagesSimple(anthropicModel, context, options)
+  },
   'openai-responses': openaiResponses as BridgeTransport,
   'openai-completions': openaiCompletions as BridgeTransport,
 }
@@ -67,6 +74,20 @@ const THINKING_LEVELS: readonly ThinkingLevel[] = ['minimal', 'low', 'medium', '
 /** Request ceiling when Copilot does not advertise `max_output_tokens`. */
 const FALLBACK_MAX_TOKENS = 16_384
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+
+/** Exact Copilot IDs, not protocol inference. Sources and default policy: README §Thinking compatibility. */
+const ANTHROPIC_THINKING_POLICY: Readonly<Record<string, 'adaptive' | 'always-adaptive'>> = {
+  'claude-fable-5': 'always-adaptive',
+  'claude-fable-5.1': 'always-adaptive',
+  'claude-haiku-5.5': 'adaptive',
+  'claude-opus-4.7': 'adaptive',
+  'claude-opus-4.8': 'adaptive',
+  'claude-opus-5': 'adaptive',
+  'claude-opus-5.5': 'always-adaptive',
+  'claude-sonnet-4.6': 'adaptive',
+  'claude-sonnet-5': 'adaptive',
+  'claude-sonnet-5.5': 'always-adaptive',
+}
 
 interface BoundCall {
   readonly model: SupportedCatalogModel
@@ -113,6 +134,8 @@ function resolvedInfo(model: SupportedCatalogModel, vision: boolean): LlmResolve
 
 function piModel(model: SupportedCatalogModel, baseUrl: string): Model<CatalogProtocol> {
   const efforts = supportedEfforts(model)
+  const thinking = model.protocol === 'anthropic-messages' && Object.hasOwn(ANTHROPIC_THINKING_POLICY, model.id)
+    ? ANTHROPIC_THINKING_POLICY[model.id] : undefined
   return {
     id: model.id,
     name: model.name,
@@ -122,7 +145,8 @@ function piModel(model: SupportedCatalogModel, baseUrl: string): Model<CatalogPr
     input: [...model.input],
     cost: ZERO_COST,
     headers: { ...COPILOT_HEADERS },
-    reasoning: efforts.length > 0,
+    reasoning: efforts.length > 0 || thinking === 'always-adaptive',
+    ...thinking === undefined ? {} : { compat: { forceAdaptiveThinking: true } },
     // Unadvertised levels map to `null` so pi-ai never clamps onto an invented level.
     thinkingLevelMap: Object.fromEntries(THINKING_LEVELS.map(level => [level, efforts.includes(level) ? level : null])),
     contextWindow: model.contextWindow ?? 0,
