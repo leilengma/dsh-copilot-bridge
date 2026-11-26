@@ -40,7 +40,7 @@ function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean;
   const settingWrites: unknown[] = []
   const updates: string[] = []
   const requests: { url: string; init: RequestInit | undefined }[] = []
-  let discovery: () => Promise<Response> = async () => Response.json(modelsPayload)
+  let discovery: (init?: RequestInit) => Promise<Response> = async () => Response.json(modelsPayload)
   let inference: (init?: RequestInit) => Promise<Response> = async () => { throw new Error('unexpected inference') }
   let exchanges = 0
   t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
@@ -52,7 +52,7 @@ function host(t: TestContext, options: { signedOut?: boolean; lateLlm?: boolean;
       return Response.json({ token: `fixture-access-${exchanges}`, expires_at: Date.now() / 1000 + 3600,
         refresh_in: 1800, endpoints: { api: host === 'github.com' ? 'https://api.individual.githubcopilot.com' : `https://copilot-api.${host}` } })
     }
-    if (url.endsWith('/models')) return discovery()
+    if (url.endsWith('/models')) return discovery(init)
     return inference(init)
   })
   ctx.provide('connection', { fetch: { register(route: ConnectionFetchRoute) {
@@ -185,4 +185,135 @@ test('hide/reveal and all-hidden changes refresh only the bridge picker; routes 
   assert.deepEqual(ids(await h.runtime.listModels('github-copilot')), ['mai-code-2'])
   assert.equal(Object.hasOwn(h.runtime, 'listModels'), false)
   assert.deepEqual(h.credentialWrites, [])
+})
+
+test('manual refresh keeps the last good catalog and hidden ids after failure, then accepts known empty', async t => {
+  const h = host(t, { hidden: ['mai-code-2'] })
+  await h.picker()
+  h.discover(async () => new Response('fixture-access-secret', { status: 503 }))
+  const failed = (await h.request('models/refresh', {})).envelope.value
+  assert.equal(failed.state, 'error')
+  assert.equal(failed.error, 'Copilot model discovery failed (HTTP 503)')
+  assert.deepEqual(failed.status.hiddenModels, ['mai-code-2'])
+  assert.equal(failed.models.length, 10)
+  assert.deepEqual(await h.picker(), supported.filter(id => id !== 'mai-code-2'))
+  assert.deepEqual(h.hiddenModels.get(), ['mai-code-2'])
+  h.discover(async () => Response.json({ data: [] }))
+  const empty = (await h.request('models/refresh', {})).envelope.value
+  assert.equal(empty.state, 'ready')
+  assert.deepEqual(empty.models, [])
+  assert.deepEqual(await h.picker(), [])
+})
+
+test('sign-out discards discovery, clears hidden config, and empties the picker without changing native state', async t => {
+  const h = host(t, { hidden: ['mai-code-2'] })
+  const gate = deferred<Response>()
+  h.discover(() => gate.promise)
+  await settle()
+  const pending = h.picker()
+  await settle()
+  const before = h.updates.length
+  const logout = await h.request('logout', {})
+  assert.equal(logout.envelope.value.authenticated, false)
+  assert.deepEqual(await h.picker(), [])
+  assert.deepEqual(h.hiddenModels.get(), [])
+  assert.ok(h.updates.length > before)
+  gate.resolve(Response.json(modelsPayload))
+  assert.deepEqual(await pending, [])
+  assert.deepEqual((await h.request('models')).envelope.value.models, [])
+  assert.deepEqual(ids(await h.runtime.listModels('github-copilot')), ['mai-code-2'])
+  assert.deepEqual(h.credentialWrites, [BRIDGE_RECORD_KEY])
+  h.discover(async () => Response.json(modelsPayload))
+  h.setAccount(account('second-account'))
+  assert.deepEqual(await h.picker(), supported)
+  h.setAccount(undefined)
+  assert.deepEqual(await h.picker(), [])
+})
+
+test('host switch gates a preserved account, discards old discovery and resumes only for a matching signed-in host', async t => {
+  const h = host(t, { hidden: ['mai-code-2'] })
+  const gate = deferred<Response>()
+  h.discover(() => gate.promise)
+  await settle()
+  const old = h.picker()
+  await settle()
+  h.editHost('https://acme.ghe.com/')
+  assert.deepEqual(await h.picker(), [])
+  assert.deepEqual(h.hiddenModels.get(), [])
+  const status = (await h.request('status')).envelope.value
+  assert.equal(status.signedInHost, 'github.com')
+  const before = h.requests.length
+  gate.resolve(Response.json(modelsPayload))
+  assert.deepEqual(await old, [])
+  await h.request('models/refresh', {})
+  assert.equal(h.requests.length, before, 'a mismatched account cannot make even discovery requests')
+  h.discover(async () => Response.json(modelsPayload))
+  h.setAccount(account('enterprise-account', 'acme.ghe.com'))
+  assert.deepEqual(await h.picker(), supported)
+  assert.ok(h.requests.some(request => request.url === 'https://copilot-api.acme.ghe.com/models'))
+})
+
+test('unload/reload disposes registration, routes, timers, pending discovery and listeners', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const h = host(t)
+  await h.picker()
+  const gate = deferred<Response>()
+  h.discover(() => gate.promise)
+  const refresh = h.request('models/refresh', {})
+  await settle()
+  const pendingRequest = h.requests.at(-1)!
+  await h.plugin.dispose()
+  assert.equal(pendingRequest.init?.signal?.aborted, true)
+  assert.ok(!h.runtime.listProviders().some(provider => provider.id === BRIDGE_PROVIDER))
+  const before = h.requests.length
+  const updates = h.updates.length
+  h.setAccount(account('changed-while-unloaded'))
+  h.editHidden(['mai-code-2'])
+  t.mock.timers.tick(1_800_000)
+  await settle()
+  assert.equal(h.requests.length, before)
+  assert.equal(h.updates.length, updates)
+  gate.resolve(Response.json(modelsPayload))
+  await refresh
+  h.discover(async () => Response.json(modelsPayload))
+  const reloaded = h.mount()
+  assert.deepEqual(await h.picker(), supported.filter(id => id !== 'mai-code-2'))
+  const after = h.updates.length
+  h.editHidden([])
+  assert.equal(h.updates.length - after, 1, 'reload must have exactly one volatile listener')
+  await reloaded.dispose()
+})
+
+test('management metadata uses the exchanged endpoint and every discovery/exchange/metadata request is attributed', async t => {
+  const h = host(t)
+  h.discover(async () => Response.json({ data: modelsPayload.data.map(row => ({ ...row,
+    secret: 'raw-descriptor-must-not-leak', billing: { token_prices: { batch_size: 1000, default: { input_price: 0.005 } } },
+  })) }))
+  await h.picker()
+  const view = (await h.request('models')).envelope.value
+  assert.deepEqual(view.models.find((row: { id: string }) => row.id === 'mai-code-2').pricing, { input: 5 })
+  assert.ok(!JSON.stringify(view).includes('raw-descriptor'))
+  assert.equal(h.exchanges, 1, 'metadata must reuse the access token')
+  assert.equal(h.requests.filter(request => request.url.endsWith('/models')).length, 2)
+  for (const { init } of h.requests) {
+    for (const [key, value] of Object.entries(attributionHeaders())) assert.equal(new Headers(init?.headers).get(key), value)
+    assert.equal(init?.redirect, 'error')
+  }
+})
+
+test('token refresh racing discovery publishes only the latest generation', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const h = host(t)
+  const gate = deferred<Response>()
+  h.discover(() => gate.promise)
+  await settle()
+  assert.equal(h.exchanges, 1)
+  t.mock.timers.tick(1_800_000)
+  await settle()
+  assert.equal(h.exchanges, 2)
+  h.discover(async () => Response.json({ data: modelsPayload.data.filter(row => row.id === 'mai-code-2') }))
+  gate.resolve(Response.json(modelsPayload))
+  assert.deepEqual(await h.picker(), ['mai-code-2'])
+  assert.ok(h.requests.filter(request => request.url.endsWith('/models')).some(request =>
+    new Headers(request.init?.headers).get('authorization') === 'Bearer fixture-access-2'))
 })

@@ -1,4 +1,6 @@
 import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
+import { attributionHeaders } from '@deepseek-ai/dsh-llm'
+import { allowedBaseUrl, type AccessToken } from './access-token.ts'
 import type { CopilotModel, ModelPrices } from '../shared/contract.ts'
 import { readBridgeAccount } from './bridge-credentials.ts'
 import { githubFetch } from './transport.ts'
@@ -83,11 +85,7 @@ function modelsUrl(token: string, enterprise: string | undefined): string {
 }
 
 /** Short-lived Copilot access token, held in host memory by the bridge. */
-export interface CopilotAccessToken {
-  readonly token: string
-  /** Epoch milliseconds. */
-  readonly expiresAt: number
-}
+export type CopilotAccessToken = Pick<AccessToken, 'token' | 'expiresAt'> & Partial<Pick<AccessToken, 'baseUrl'>>
 
 /**
  * Reuse the bridge's access token; never exchange, persist or expose credentials here.
@@ -113,7 +111,9 @@ export function createCopilotMetadata(deps: {
         return new Map()
       }
       const { token } = access
-      const url = modelsUrl(token, account.enterpriseHost)
+      const baseUrl = access.baseUrl === undefined ? undefined : allowedBaseUrl(access.baseUrl, account.enterpriseHost)
+      if (access.baseUrl !== undefined && baseUrl === undefined) return new Map()
+      const url = baseUrl === undefined ? modelsUrl(token, account.enterpriseHost) : `${baseUrl}/models`
       if (cache?.token === token && cache.url === url && cache.expiresAt > now()) return cache.value
       const entry = { token, url, expiresAt: Math.min(now() + 300_000, expires), value: Promise.resolve<Metadata>(new Map()) }
       cache = entry
@@ -122,9 +122,9 @@ export function createCopilotMetadata(deps: {
           const response = await fetch(url, {
             headers: {
               Accept: 'application/json', Authorization: `Bearer ${token}`,
-              'User-Agent': 'GitHubCopilotChat/0.35.0', 'Editor-Version': 'vscode/1.107.0',
+              'Editor-Version': 'vscode/1.107.0',
               'Editor-Plugin-Version': 'copilot-chat/0.35.0', 'Copilot-Integration-Id': 'vscode-chat',
-              'X-GitHub-Api-Version': '2026-06-01',
+              'X-GitHub-Api-Version': '2026-06-01', ...attributionHeaders(),
             },
             redirect: 'error', signal: AbortSignal.timeout(5000),
           })
