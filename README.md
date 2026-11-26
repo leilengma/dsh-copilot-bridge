@@ -33,6 +33,16 @@ The `/copilot-login`, `/copilot-status` and `/copilot-logout` commands work on c
 
 If you change the host while signed in, the page tells you that the stored credential belongs to the other host. Sign out and sign in again to switch.
 
+The **GitHub host** section is shown only while signed out; sign out first to choose a different host. The Account tab omits the duplicate GitHub Copilot heading.
+
+### Account usage
+
+While signed in, the **Account** tab shows usage directly beneath **Signed in at …**: percentage used, progress and the provider's reset time. Hover or keyboard-focus the percentage for exact used / total credits (or requests on request-based plans). Unlimited and unavailable quotas are labelled rather than displayed as zero.
+
+Usage refreshes when Account opens or credentials change. The small **Refresh usage** icon fetches a fresh snapshot; there is no continuous polling. Unlike VS Code, Harness does not currently expose the per-response quota headers to plugins, so usage is not live-updated after every model request.
+
+The authenticated `/api/copilot-bridge/usage` route reads `copilot_internal/user` host-side using the saved grant's issuer and OAuth credential, shared proxy transport, a 5-second timeout and no redirects. Concurrent reads for the same credential are coalesced, but results are not persistently cached. Only allowlisted display fields reach the browser; credential changes invalidate in-flight results. Usage errors do not prevent signing out or changing settings.
+
 ## Configuration
 
 **Save** writes the value to the profile's own patch file, `~/.dsh/profiles/<profile>/cordis.patch.yml`:

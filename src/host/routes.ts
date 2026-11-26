@@ -1,5 +1,5 @@
 import type { ConnectionFetchRoute } from '@deepseek-ai/dsh-client-connection'
-import { API_BASE, type ApiEnvelope, type EnterpriseUrlRequest } from '../shared/contract.ts'
+import { API_BASE, type ApiEnvelope, type EnterpriseUrlRequest, type CopilotUsage } from '../shared/contract.ts'
 import type { AuthController } from './auth-controller.ts'
 import { InvalidHiddenModelsError } from './hidden-models.ts'
 import { modelCatalog } from './model-catalog.ts'
@@ -37,8 +37,10 @@ export function authRoutes(
   auth: AuthController,
   runtime: () => Pick<LlmRuntime, 'resolveModelInfo'> | undefined = () => undefined,
   metadata?: () => Promise<ReadonlyMap<string, CopilotMetadata>>,
+  usage: () => Promise<CopilotUsage> = async () => ({ state: 'unavailable' }),
 ): ConnectionFetchRoute[] {
   return [
+    { path: `${API_BASE}/usage`, methods: ['GET'], requestBody: 'buffered', fetch: route(() => usage()) },
     { path: `${API_BASE}/status`, methods: ['GET'], requestBody: 'buffered', fetch: route(() => auth.status()) },
     { path: `${API_BASE}/models`, methods: ['GET'], requestBody: 'buffered', fetch: route(async () => modelCatalog(await auth.status(), runtime(), metadata)) },
     { path: `${API_BASE}/login`, methods: ['POST'], requestBody: 'buffered', fetch: route(() => auth.login()) },

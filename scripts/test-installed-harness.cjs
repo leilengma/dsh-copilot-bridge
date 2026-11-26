@@ -15,7 +15,14 @@ const settle = () => new Promise(resolve => setImmediate(resolve))
 async function main() {
   const originalFetch = globalThis.fetch
   let metadataRequests = 0
+  let usageRequests = 0
   globalThis.fetch = async (url, init) => {
+    if (url === 'https://api.github.com/copilot_internal/user') {
+      usageRequests++
+      assert.equal(init.headers.Authorization, 'token fixture-only')
+      assert.equal(init.redirect, 'error')
+      return Response.json({ token_based_billing: true, quota_snapshots: { premium_interactions: { entitlement: 100000, quota_remaining: 53916.3, percent_remaining: 53.9 } } })
+    }
     assert.equal(url, 'https://api.individual.githubcopilot.com/models', 'unexpected network request')
     assert.equal(init.redirect, 'error')
     metadataRequests++
@@ -71,6 +78,13 @@ async function main() {
     assert.equal(row.retiring, 'Provider retirement warning')
     assert.equal(metadataRequests, 1, 'metadata enriches management, not picker visibility')
     assert.ok(!JSON.stringify(catalog).includes('fixture-only'), 'never expose grant secrets')
+    const usageResponse = await routes.get('/api/copilot-bridge/usage').fetch(new Request('https://localhost/api/copilot-bridge/usage'))
+    assert.equal(usageResponse.status, 200)
+    const usage = (await usageResponse.json()).value
+    assert.equal(usage.used, 46083.7)
+    assert.equal(usage.total, 100000)
+    assert.equal(usageRequests, 1)
+    assert.ok(!JSON.stringify(usage).includes('fixture-only'), 'quota must never expose credentials')
     console.log(JSON.stringify({ baseline: baseline.length, filtered: models.length, hiddenOmitted: true, management: catalog.models.length, hiddenMetadata: { name: row.name, contextWindow: row.contextWindow } }))
     await fiber.dispose()
     assert.equal((await consumer.listModels('github-copilot')).length, baseline.length, 'unload must restore the catalog')

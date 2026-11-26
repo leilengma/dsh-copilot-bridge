@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Button, Input, RiskConfirmation, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { AuthStatus } from '../shared/contract.ts'
 import { api, errorMessage } from './api.ts'
+import { AccountUsage } from './account-usage.tsx'
 import { DeviceCodeField, StateLabel } from './components.tsx'
 import { text, useLocaleRevision } from './i18n.ts'
 import { authRevision } from './store.ts'
@@ -71,9 +72,10 @@ function EnterpriseUrlCard({ status, busy, onSave }: {
 }
 
 /** Account tab: parent-owned authentication status also gates the Models tab. */
-export function CopilotAccount({ status, onStatusChange }: {
+export function CopilotAccount({ status, onStatusChange, active }: {
   readonly status: AuthStatus | undefined
   readonly onStatusChange: (status: AuthStatus) => void
+  readonly active: boolean
 }) {
   useLocaleRevision()
   const [busy, setBusy] = useState(false)
@@ -128,10 +130,9 @@ export function CopilotAccount({ status, onStatusChange }: {
   const authenticated = status?.authenticated === true
   return (
     <section style={css.section}>
-      <h2 style={css.title}>{text('title')}</h2>
       <p style={css.intro}>{text('intro')}</p>
 
-      <EnterpriseUrlCard status={status} busy={busy} onSave={value => act(() => api.setEnterpriseUrl(value))} />
+      {!authenticated ? <EnterpriseUrlCard status={status} busy={busy} onSave={value => act(() => api.setEnterpriseUrl(value))} /> : null}
 
       <div style={css.card}>
         <div style={css.row}>
@@ -167,6 +168,7 @@ export function CopilotAccount({ status, onStatusChange }: {
           ? (
             <>
               <p style={css.body}>{text('signedInAt', { host: status.signedInHost ?? status.githubHost })}</p>
+              {active ? <AccountUsage issuer={status.signedInHost ?? status.githubHost} /> : null}
               <p style={css.hint}>{text('whereToSelect', { provider: status.provider })}</p>
             </>
           )

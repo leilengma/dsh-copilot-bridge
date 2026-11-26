@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Show authenticated account credit usage below **Signed in at …**, with a progress bar, provider reset time, exact used/total on hover or keyboard focus, and a manual refresh icon. Refresh on opening Account and credential changes without polling; keep OAuth credentials and raw quota responses on the host. Remove the duplicate Account-tab title and hide GitHub host configuration while signed in.
+
 - Consolidate GitHub Copilot under **Plugins → GitHub Copilot** with **Account** and **Models** tabs. Move authentication and Enterprise host configuration out of Settings; show Models only while signed in, and return to Account on sign-out. Update sign-in guidance in English and Chinese.
 
 - Enrich the Plugins model table with live Copilot credit prices (including long-context tiers), active discount badges and informational **Retiring** warnings. Read metadata host-side using the route-owned access token, with bounded caching, proxy support and fail-open missing data; model eligibility and visibility are unchanged.

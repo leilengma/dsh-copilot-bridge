@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { buildSync } from 'esbuild'
 import type { CopilotPluginTabs } from '../src/client/plugin-page.tsx'
+import type { UsageDisplay } from '../src/client/account-usage.tsx'
 import type { ModelsTable } from '../src/client/hidden-models-card.tsx'
 
 type TableProps = Parameters<typeof ModelsTable>[0]
@@ -15,6 +16,7 @@ const compiled = buildSync({
     import { renderToStaticMarkup } from 'react-dom/server'
     import { CopilotPluginTabs } from './src/client/plugin-page.tsx'
     import { ModelsTable } from './src/client/hidden-models-card.tsx'
+    import { UsageDisplay } from './src/client/account-usage.tsx'
     import { apply } from './src/client/index.tsx'
     import { authRevision } from './src/client/store.ts'
     const slots = []
@@ -28,6 +30,7 @@ const compiled = buildSync({
     export const registrations = slots.map(({slot}) => ({ name: slot.name, id: slot.id, label: slot.label?.() }))
     export const summary = renderToStaticMarkup(createElement(slots.find(({slot}) => slot.name === 'plugins.item').component, { view: 'summary' }))
     export const renderTabs = props => renderToStaticMarkup(createElement(CopilotPluginTabs, props))
+    export const renderUsage = props => renderToStaticMarkup(createElement(UsageDisplay, props))
     export const renderTable = props => renderToStaticMarkup(createElement(ModelsTable, props))
     export const getRevision = authRevision.getSnapshot
     export const subscribeToRevision = authRevision.subscribe
@@ -48,6 +51,7 @@ const ui = bundled.exports as {
   emitRemote: (event: string, key: string) => void
   renderTabs: (props: Parameters<typeof CopilotPluginTabs>[0]) => string
   renderTable: (props: TableProps) => string
+  renderUsage: (props: Parameters<typeof UsageDisplay>[0]) => string
 }
 
 const status: TableProps['status'] = {
@@ -60,6 +64,22 @@ const props: TableProps = {
     { id: 'gpt', name: 'GPT', contextWindow: 1_000_000 },
   ],
 }
+
+test('usage exposes exact credits on focus/hover, accessible progress and manual refresh without inventing missing data', () => {
+  const html = ui.renderUsage({ loading: false, onRefresh: () => {}, usage: { state: 'available', unit: 'credits', unlimited: false, used: 46083.7, total: 100000, percentUsed: 46.1 } })
+  assert.match(html, /46% used/)
+  assert.ok(html.includes(`${(46083.7).toLocaleString(undefined, { maximumFractionDigits: 3 })} / ${(100000).toLocaleString()} used`))
+  assert.match(html, /tabindex="0"/)
+  assert.match(html, /:hover|:focus/)
+  assert.match(html, /role="progressbar"[^>]*aria-valuenow="46"/)
+  assert.match(html, /aria-label="Refresh usage"/)
+  const missing = ui.renderUsage({ loading: false, onRefresh: () => {}, usage: { state: 'unavailable' } })
+  assert.match(missing, /Usage unavailable/)
+  assert.doesNotMatch(missing, /0%|role="progressbar"/)
+  const unlimited = ui.renderUsage({ loading: false, onRefresh: () => {}, usage: { state: 'available', unit: 'requests', unlimited: true } })
+  assert.match(unlimited, /Unlimited/)
+  assert.doesNotMatch(unlimited, /0%|role="progressbar"/)
+})
 
 test('client registers GitHub Copilot only inside Plugins, not a separate Settings section', () => {
   assert.deepEqual(ui.registrations.find(slot => slot.name === 'plugins.item'), { name: 'plugins.item', id: 'copilot-bridge-models', label: 'GitHub Copilot' })
@@ -76,14 +96,18 @@ test('Account owns sign-in and host controls; Models is absent until authenticat
     assert.match(html, /role="tab"[^>]*aria-selected="true"[^>]*>Account</)
     assert.doesNotMatch(html, />Models<|Loading models|<table/)
     assert.match(html, /GitHub Enterprise URL/)
+    assert.doesNotMatch(html, /aria-label="Account usage"/)
   }
   const html = ui.renderTabs({ status, tab: 'account', onTabChange: () => {}, onStatusChange: () => {} })
   assert.match(html, />Models</)
   assert.match(html, /Sign out/)
-  assert.match(html, /GitHub Enterprise URL/)
+  assert.doesNotMatch(html, /<h2[^>]*>GitHub Copilot<\/h2>/)
+  assert.ok(html.indexOf('Signed in at github.com.') < html.indexOf('aria-label="Account usage"'))
+  assert.doesNotMatch(html, /GitHub Enterprise URL|>GitHub host</)
   const models = ui.renderTabs({ status, tab: 'models', onTabChange: () => {}, onStatusChange: () => {} })
   assert.match(models, /role="tab"[^>]*aria-selected="true"[^>]*>Models</)
   assert.match(models, /Loading models/)
+  assert.doesNotMatch(models, /aria-label="Account usage"/)
 })
 
 test('model table exposes accessible eye toggles, search and real metadata without invented costs', () => {

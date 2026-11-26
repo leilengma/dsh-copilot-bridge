@@ -83,6 +83,17 @@ export interface ModelCatalog {
   readonly models: readonly CopilotModel[]
 }
 
+/** Display-only account quota, never an OAuth token or raw user-info payload. */
+export type CopilotUsage = { readonly state: 'signed-out' | 'unavailable' } | {
+  readonly state: 'available'
+  readonly unit: 'credits' | 'requests'
+  readonly unlimited: boolean
+  readonly percentUsed?: number
+  readonly used?: number
+  readonly total?: number
+  readonly reset?: { readonly at: string; readonly hasTime: boolean }
+}
+
 /** Body of `POST /hidden-models`. An empty array removes the config key. */
 export interface HiddenModelsRequest {
   readonly hiddenModels: readonly string[]

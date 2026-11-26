@@ -66,7 +66,7 @@ export function CopilotPluginTabs({ status, tab, onTabChange, onStatusChange }: 
   return <>
     <div style={{ maxWidth: 320 }}><SegmentedTabs items={items} value={selected} onChange={onTabChange} label={text('nav')} size="sm" /></div>
     <div role="tabpanel" id="copilot-account-panel" aria-labelledby="copilot-account-tab" hidden={selected !== 'account'}>
-      <CopilotAccount status={status} onStatusChange={onStatusChange} />
+      <CopilotAccount status={status} onStatusChange={onStatusChange} active={selected === 'account'} />
     </div>
     {authenticated ? <div role="tabpanel" id="copilot-models-panel" aria-labelledby="copilot-models-tab" hidden={selected !== 'models'}>
       {selected === 'models' ? <CopilotModelsPage onStatusChange={onStatusChange} /> : null}
