@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "GitHub Copilot",
-    "description": "Sign in to GitHub Copilot and manage available models, including GitHub Enterprise accounts."
+    "description": "GitHub Copilot Bridge (copilot-bridge): device-flow sign-in and live models, including GitHub Enterprise. The native github-copilot provider stays untouched."
   }
 }

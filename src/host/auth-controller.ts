@@ -1,16 +1,11 @@
-import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
-import { credentialKey } from '@deepseek-ai/dsh-credentials'
+import { BRIDGE_PROVIDER, GITHUB_DOTCOM, type AuthStatus, type FlowState } from '../shared/contract.ts'
 import {
-  GITHUB_DOTCOM, PI_AI_PROVIDER, PI_AI_RECORD_KEY, PI_AI_RECORD_SCOPE,
-  type AuthStatus, type FlowState,
-} from '../shared/contract.ts'
+  deleteBridgeAccount, readBridgeAccount, writeBridgeAccount, type BridgeAccount, type CredentialStore,
+} from './bridge-credentials.ts'
 import type { DeviceAuthorization, PollResult } from './device-flow.ts'
 import { normalizeEnterpriseDomain } from './enterprise.ts'
-import { grantEnterpriseDomain, grantToken, piAiGrantRecord } from './grant.ts'
-import { createModelFilter, fullModelIds, InvalidHiddenModelsError, validateHiddenModels } from './hidden-models.ts'
-
-/** The slice of the Harness credential service this plugin uses. */
-export type CredentialStore = Pick<CredentialProvider, 'readRecord' | 'modifyRecord' | 'deleteRecord'>
+import { InvalidHiddenModelsError, validateHiddenModels } from './hidden-models.ts'
+import { InvalidPinnedModelsError, validatePinnedModels } from './pinned-models.ts'
 
 /** Live bridge configuration, persisted in the profile's `cordis.patch.yml`. */
 export interface BridgeConfig {
@@ -23,18 +18,26 @@ export interface BridgeConfig {
   readHidden(): readonly string[]
   /** Remove the key when undefined. */
   writeHidden(ids: readonly string[] | undefined): Promise<void>
+  readPinned(): readonly string[]
+  /** Remove the key when undefined. */
+  writePinned(ids: readonly string[] | undefined): Promise<void>
 }
 
 export interface AuthControllerDeps {
   /** The credential service, or undefined while it is not mounted. */
   readonly credentials: () => CredentialStore | undefined
   readonly config: BridgeConfig
-  /** Configure the native provider if absent and refresh its model catalog. */
-  readonly ensureProvider: () => Promise<void>
-  /** Full configured provider catalog, before this bridge's visibility filter. */
-  readonly providerModelIds?: () => Promise<readonly string[] | undefined>
-  readonly startDeviceFlow: (enterpriseDomain?: string) => Promise<DeviceAuthorization>
-  readonly pollDeviceFlow: (device: DeviceAuthorization) => Promise<PollResult>
+  /**
+   * Ids of the signed-in account's model catalog, or undefined while unknown.
+   * When known, status lists them and `setHiddenModels` rejects other ids.
+   */
+  readonly catalogIds?: () => Promise<readonly string[] | undefined>
+  /** Called after a completed device flow stored the account; failures are logged, never fail sign-in. */
+  readonly onSignedIn?: (account: BridgeAccount) => void | Promise<void>
+  /** Called after sign-out deleted the account; failures are logged, never fail sign-out. */
+  readonly onSignedOut?: () => void | Promise<void>
+  readonly startDeviceFlow: (enterpriseDomain?: string, signal?: AbortSignal) => Promise<DeviceAuthorization>
+  readonly pollDeviceFlow: (device: DeviceAuthorization, signal?: AbortSignal) => Promise<PollResult>
   readonly logger: { info(message: string): void; warn(message: string): void; error(error: unknown): void }
   readonly now?: () => number
   readonly setTimer?: (callback: () => void, ms: number) => unknown
@@ -43,15 +46,16 @@ export interface AuthControllerDeps {
 
 export interface AuthController {
   status(): Promise<AuthStatus>
-  /** Re-apply after a credential write or a live config update. */
-  syncModels(): Promise<void>
   setHiddenModels(input: unknown): Promise<AuthStatus>
+  setPinnedModels(input: unknown): Promise<AuthStatus>
   /** Start (or resume) a device flow; answers the already-authenticated status when signed in. */
   login(): Promise<AuthStatus>
   logout(): Promise<AuthStatus>
   /** Validate, normalize, and persist the enterprise URL; an empty value resets to github.com. */
   setEnterpriseUrl(input: string): Promise<AuthStatus>
-  /** Stop polling; called when the plugin is disposed. */
+  /** Cancel pending authorization and polling when the configured host changes. */
+  cancelLogin(): void
+  /** Permanently stop device-flow work when the plugin is disposed. */
   dispose(): void
 }
 
@@ -59,7 +63,7 @@ type Flow =
   | { readonly state: 'pending'; readonly verificationUri: string; readonly userCode: string; readonly expiresAt: number }
   | { readonly state: Exclude<FlowState, 'pending'>; readonly message?: string }
 
-const recordKey = () => credentialKey(PI_AI_RECORD_SCOPE, PI_AI_PROVIDER)
+const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
 export function createAuthController(deps: AuthControllerDeps): AuthController {
   const now = deps.now ?? Date.now
@@ -67,9 +71,9 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
   const clearTimer = deps.clearTimer ?? ((handle: unknown) => { clearTimeout(handle as NodeJS.Timeout) })
   let flow: Flow = { state: 'signed-out' }
   let generation = 0
-  let providerSetup: AuthStatus['providerSetup']
+  let disposed = false
+  let deviceRequest: AbortController | undefined
   let timer: unknown
-  const models = createModelFilter(deps.credentials, deps.config, message => deps.logger.warn(message))
 
   /** Configured enterprise host; an invalid saved value is reported, not silently replaced by github.com. */
   const configuredDomain = (): string | undefined => normalizeEnterpriseDomain(deps.config.read())
@@ -77,8 +81,15 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
 
   const stopPolling = (): void => {
     generation += 1
+    deviceRequest?.abort()
+    deviceRequest = undefined
     if (timer !== undefined) clearTimer(timer)
     timer = undefined
+  }
+
+  const cancelLogin = (): void => {
+    stopPolling()
+    flow = { state: 'signed-out' }
   }
 
   const requireCredentials = (action: string): CredentialStore => {
@@ -87,85 +98,56 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
     return credentials
   }
 
-  const readGrant = async () => deps.credentials()?.readRecord(recordKey())
+  const readAccount = () => readBridgeAccount(deps.credentials())
 
-  /**
-   * Publish the token to the record the route reads, then read it back: the
-   * record format belongs to another plugin, so a shape it stops accepting must
-   * fail here rather than leave a credential that authenticates nothing.
-   */
-  const storeToken = async (token: string, enterpriseDomain: string | undefined): Promise<void> => {
-    const credentials = requireCredentials('signing in')
-    await credentials.modifyRecord(recordKey(), async () => piAiGrantRecord(token, enterpriseDomain))
-    const written = await credentials.readRecord(recordKey())
-    if (grantToken(written) !== token || grantEnterpriseDomain(written) !== enterpriseDomain) {
-      throw new Error(`the credential record at ${PI_AI_RECORD_KEY} did not survive the write; the consuming plugin may have changed its grant format`)
-    }
-  }
-
-  const resetHiddenModels = async (): Promise<void> => {
+  const catalogIds = async (): Promise<readonly string[] | undefined> => {
     try {
-      await models.synchronize()
-      await deps.config.writeHidden(undefined)
+      return await deps.catalogIds?.()
     } catch (error) {
-      deps.logger.warn(`Could not reset hidden models: ${error instanceof Error ? error.message : String(error)}`)
+      deps.logger.warn(`Could not read the model catalog: ${errorMessage(error)}`)
+      return undefined
     }
   }
+
+  /** Best-effort side effects of a sign-in/out; they never change its outcome. */
+  const bestEffort = async (label: string, action: () => void | Promise<void>): Promise<void> => {
+    try {
+      await action()
+    } catch (error) {
+      deps.logger.warn(`${label}: ${errorMessage(error)}`)
+    }
+  }
+  const resetHiddenModels = () => bestEffort('Could not reset hidden models', () => deps.config.writeHidden(undefined))
+  const resetPinnedModels = () => bestEffort('Could not reset pinned models', () => deps.config.writePinned(undefined))
 
   const status = async (): Promise<AuthStatus> => {
-    await models.synchronize()
-    const record = await readGrant()
+    const account = await readAccount()
     const base = {
-      provider: PI_AI_PROVIDER,
+      provider: BRIDGE_PROVIDER,
       githubHost: githubHost(),
       enterpriseUrl: deps.config.read().trim(),
       configWritable: deps.config.writable(),
     } as const
-    if (grantToken(record) === undefined) {
+    if (account === undefined) {
       return { ...base, authenticated: false, ...(flow.state === 'authenticated' ? { state: 'signed-out' } : flow) }
     }
-    const signedInHost = grantEnterpriseDomain(record) ?? GITHUB_DOTCOM
-    let modelIds = fullModelIds(record)
-    let modelCatalogSource: 'provider' | undefined
-    if (modelIds === undefined) {
-      try {
-        const ids = await deps.providerModelIds?.()
-        if (ids !== undefined) {
-          modelIds = [...new Set(ids)]
-          modelCatalogSource = 'provider'
-        }
-      } catch (error) {
-        deps.logger.warn(`Could not read GitHub Copilot provider catalog: ${error instanceof Error ? error.message : String(error)}`)
-      }
-    }
+    const signedInHost = account.enterpriseHost ?? GITHUB_DOTCOM
+    const ids = await catalogIds()
+    const modelIds = ids === undefined ? undefined : [...new Set(ids)].sort()
     return {
       ...base,
       authenticated: true,
       state: 'authenticated',
-      ...(providerSetup === undefined ? {} : { providerSetup }),
       ...(signedInHost === base.githubHost ? {} : { signedInHost }),
-      ...(modelCatalogSource === undefined ? {} : { modelCatalogSource }),
       hiddenModels: [...new Set(deps.config.readHidden())].filter(id => modelIds === undefined || modelIds.includes(id)),
-      ...(modelIds === undefined ? {} : { modelCount: modelIds.length, availableModels: [...modelIds].sort() }),
+      pinnedModels: [...new Set(deps.config.readPinned())],
+      ...(modelIds === undefined ? {} : { modelCount: modelIds.length, availableModels: modelIds }),
     }
   }
 
-  const setupProvider = async (current: number): Promise<void> => {
-    if (current !== generation) return
-    providerSetup = 'pending'
-    try {
-      await deps.ensureProvider()
-      if (current === generation) providerSetup = 'ready'
-    } catch (error) {
-      if (current !== generation) return
-      providerSetup = 'warning'
-      deps.logger.warn(`Could not set up GitHub Copilot provider: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
-
-  const schedulePoll = (device: DeviceAuthorization): void => {
-    stopPolling()
+  const schedulePoll = (device: DeviceAuthorization, abort: AbortController): void => {
     const current = generation
+    const active = () => current === generation && !disposed && !abort.signal.aborted
     const deadline = now() + device.expiresIn * 1000
     let interval = device.interval
     flow = { state: 'pending', verificationUri: device.verificationUri, userCode: device.userCode, expiresAt: deadline }
@@ -180,25 +162,31 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
         finish('expired', 'The device code expired. Start sign-in again.')
         return
       }
-      const result = await deps.pollDeviceFlow(device)
+      const result = await deps.pollDeviceFlow(device, abort.signal)
       if (current !== generation) return
       switch (result.state) {
-        case 'done':
+        case 'done': {
+          const account: BridgeAccount = device.domain === GITHUB_DOTCOM
+            ? { token: result.token }
+            : { token: result.token, enterpriseHost: device.domain }
           try {
-            // Credential events can reach the client before setup finishes. Keep its status poll alive.
-            providerSetup = 'pending'
-            await storeToken(result.token, device.domain === GITHUB_DOTCOM ? undefined : device.domain)
-            await resetHiddenModels()
-            await setupProvider(current)
-            if (current !== generation) return
-            finish('authenticated')
-            deps.logger.info(`GitHub Copilot sign-in at ${device.domain} completed`)
+            await writeBridgeAccount(requireCredentials('signing in'), account, abort.signal)
           } catch (error) {
-            if (current === generation) providerSetup = undefined
-            finish('error', error instanceof Error ? error.message : String(error))
+            if (!active()) return
+            finish('error', errorMessage(error))
             deps.logger.error(error)
+            return
           }
+          if (!active()) return
+          await resetHiddenModels()
+          if (!active()) return
+          await resetPinnedModels()
+          if (!active()) return
+          finish('authenticated')
+          deps.logger.info(`GitHub Copilot sign-in at ${device.domain} completed`)
+          await bestEffort('Sign-in follow-up failed', () => deps.onSignedIn?.(account))
           return
+        }
         case 'expired': finish('expired', 'The device code expired. Start sign-in again.'); return
         case 'denied': finish('denied', 'GitHub authorization was denied.'); return
         case 'error': finish('error', result.message); return
@@ -211,52 +199,66 @@ export function createAuthController(deps: AuthControllerDeps): AuthController {
   }
 
   const login = async (): Promise<AuthStatus> => {
-    if (grantToken(await readGrant()) !== undefined) {
-      await setupProvider(generation)
-      return status()
-    }
+    if (disposed) throw new Error('GitHub sign-in is disposed')
+    const current = generation
+    const host = configuredDomain()
+    const account = await readAccount()
+    if (current !== generation || disposed || host !== configuredDomain()) throw new Error('GitHub sign-in was cancelled')
+    if (account !== undefined) return status()
     if (flow.state === 'pending' && now() < flow.expiresAt) return status()
-    schedulePoll(await deps.startDeviceFlow(configuredDomain()))
+    stopPolling()
+    const started = generation
+    const abort = deviceRequest = new AbortController()
+    const device = await deps.startDeviceFlow(host, abort.signal)
+    if (started !== generation || disposed || host !== configuredDomain()) throw new Error('GitHub sign-in was cancelled')
+    schedulePoll(device, abort)
     return status()
   }
 
   const logout = async (): Promise<AuthStatus> => {
     const credentials = requireCredentials('signing out')
-    stopPolling()
-    flow = { state: 'signed-out' }
-    providerSetup = undefined
-    await credentials.deleteRecord(recordKey())
+    cancelLogin()
+    await deleteBridgeAccount(credentials)
     await resetHiddenModels()
+    await resetPinnedModels()
+    await bestEffort('Sign-out follow-up failed', () => deps.onSignedOut?.())
     return status()
   }
 
   const setEnterpriseUrl = async (input: string): Promise<AuthStatus> => {
     const host = normalizeEnterpriseDomain(input)
     if (!deps.config.writable()) throw new Error('saving the enterprise URL needs the settings service and a profile entry')
+    // Invalidate even authorization requests that have not returned a device code yet.
+    cancelLogin()
     await deps.config.write(host)
-    // A device code issued by the previous host cannot complete on the new one.
-    if (flow.state === 'pending') {
-      stopPolling()
-      flow = { state: 'signed-out' }
-    }
     deps.logger.info(`GitHub host set to ${host ?? GITHUB_DOTCOM}`)
     return status()
   }
 
+  /** Accepts any ids while the catalog is unknown; catalog-aware rules are injected via `catalogIds`. */
   const setHiddenModels = async (input: unknown): Promise<AuthStatus> => {
     const hidden = validateHiddenModels(input)
     if (!deps.config.writable()) throw new Error('saving hidden models needs the settings service and a profile entry')
-    await models.synchronize()
-    const full = fullModelIds(await readGrant())
-    if (full !== undefined && hidden.some(id => !full.includes(id))) {
+    const known = await catalogIds()
+    if (known !== undefined && hidden.some(id => !known.includes(id))) {
       throw new InvalidHiddenModelsError('hiddenModels contains an id not in the account model list')
     }
     await deps.config.writeHidden(hidden.length === 0 ? undefined : hidden)
     return status()
   }
 
-  return {
-    status, login, logout, setEnterpriseUrl, setHiddenModels, syncModels: () => models.synchronize(),
-    dispose() { stopPolling(); models.dispose() },
+  const setPinnedModels = async (input: unknown): Promise<AuthStatus> => {
+    const pinned = validatePinnedModels(input)
+    if (!deps.config.writable()) throw new Error('saving pinned models needs the settings service and a profile entry')
+    const known = await catalogIds()
+    const saved = new Set(deps.config.readPinned())
+    // Catalog outages or removals must not erase saved preferences; only additions need live support.
+    if (pinned.some(id => !saved.has(id) && !known?.includes(id))) {
+      throw new InvalidPinnedModelsError('pinnedModels contains an id not in the supported account model list')
+    }
+    await deps.config.writePinned(pinned.length === 0 ? undefined : pinned)
+    return status()
   }
+
+  return { status, login, logout, setEnterpriseUrl, setHiddenModels, setPinnedModels, cancelLogin, dispose() { disposed = true; cancelLogin() } }
 }

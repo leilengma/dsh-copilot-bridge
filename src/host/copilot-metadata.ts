@@ -1,6 +1,10 @@
-import { credentialKey, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
-import { PI_AI_PROVIDER, PI_AI_RECORD_SCOPE, type CopilotModel, type ModelPrices } from '../shared/contract.ts'
+import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
+import { attributionHeaders } from '@deepseek-ai/dsh-llm'
+import { allowedBaseUrl, type AccessToken } from './access-token.ts'
+import type { CopilotModel, ModelPrices } from '../shared/contract.ts'
+import { readBridgeAccount } from './bridge-credentials.ts'
 import { githubFetch } from './transport.ts'
+import { COPILOT_EDITOR_HEADERS } from './copilot-headers.ts'
 
 export type CopilotMetadata = Pick<CopilotModel, 'pricing' | 'longContextPricing' | 'defaultContextMax' | 'promotion' | 'retiring'>
 type Metadata = ReadonlyMap<string, CopilotMetadata>
@@ -71,52 +75,62 @@ function parseCatalog(raw: unknown, now: number): Metadata {
   return result
 }
 
-/** Only approved Copilot hosts or the host of the stored Enterprise grant receive the token. */
-function modelsUrl(token: string, enterprise: unknown): string {
+/** Only approved Copilot hosts or the stored Enterprise host receive the token. */
+function modelsUrl(token: string, enterprise: string | undefined): string {
   const proxy = token.match(/(?:^|;)proxy-ep=([^;]+)/)?.[1]?.replace(/^proxy\./, 'api.')
   if (proxy && /^api(?:\.[a-z0-9-]+)?\.githubcopilot\.com$/.test(proxy)) return `https://${proxy}/models`
-  if (typeof enterprise === 'string' && /^[a-z0-9]+(?:[.-][a-z0-9]+)*\.[a-z]{2,}$/.test(enterprise)) {
+  if (enterprise !== undefined && /^[a-z0-9]+(?:[.-][a-z0-9]+)*\.[a-z]{2,}$/.test(enterprise)) {
     return `https://copilot-api.${enterprise}/models`
   }
   return 'https://api.individual.githubcopilot.com/models'
 }
 
-/** Reuse the route-owned access token; never exchange, persist or expose credentials here. */
+/** Short-lived Copilot access token, held in host memory by the bridge. */
+export type CopilotAccessToken = Pick<AccessToken, 'token' | 'expiresAt'> & Partial<Pick<AccessToken, 'baseUrl' | 'signal'>>
+
+/**
+ * Reuse the bridge's access token; never exchange, persist or expose credentials here.
+ * Signed-in state and Enterprise host come from `copilot-bridge/github`.
+ */
 export function createCopilotMetadata(deps: {
   readonly credentials: () => Pick<CredentialProvider, 'readRecord'> | undefined
+  /** Current access token, or undefined while none is available. Without it, metadata is empty. */
+  readonly accessToken?: () => Promise<CopilotAccessToken | undefined>
   readonly fetch?: typeof githubFetch
   readonly now?: () => number
 }): () => Promise<Metadata> {
   const now = deps.now ?? Date.now
   const fetch = deps.fetch ?? githubFetch
-  let cache: { token: string; url: string; expiresAt: number; value: Promise<Metadata> } | undefined
+  let cache: { token: string; url: string; signal: AbortSignal | undefined; expiresAt: number; value: Promise<Metadata> } | undefined
   return async () => {
     try {
-      const record = await deps.credentials()?.readRecord(credentialKey(PI_AI_RECORD_SCOPE, PI_AI_PROVIDER))
-      const grant = record?.kind === 'grant' ? object(record.payload) : undefined
-      const expires = number(grant?.expires)
-      if (grant?.type !== 'oauth' || typeof grant.access !== 'string' || !grant.access || expires === undefined || expires <= now()) {
+      const account = await readBridgeAccount(deps.credentials())
+      const access = account === undefined ? undefined : await deps.accessToken?.()
+      const expires = number(access?.expiresAt)
+      if (account === undefined || typeof access?.token !== 'string' || !access.token || access.signal?.aborted || expires === undefined || expires <= now()) {
         cache = undefined
         return new Map()
       }
-      const token = grant.access
-      const url = modelsUrl(token, grant.enterpriseUrl)
-      if (cache?.token === token && cache.url === url && cache.expiresAt > now()) return cache.value
-      const entry = { token, url, expiresAt: Math.min(now() + 300_000, expires), value: Promise.resolve<Metadata>(new Map()) }
+      const { token } = access
+      const baseUrl = access.baseUrl === undefined ? undefined : allowedBaseUrl(access.baseUrl, account.enterpriseHost)
+      if (access.baseUrl !== undefined && baseUrl === undefined) return new Map()
+      const url = baseUrl === undefined ? modelsUrl(token, account.enterpriseHost) : `${baseUrl}/models`
+      if (cache?.token === token && cache.url === url && cache.signal === access.signal && cache.expiresAt > now()) return cache.value
+      const entry = { token, url, signal: access.signal, expiresAt: Math.min(now() + 300_000, expires), value: Promise.resolve<Metadata>(new Map()) }
       cache = entry
       entry.value = (async () => {
         try {
           const response = await fetch(url, {
             headers: {
               Accept: 'application/json', Authorization: `Bearer ${token}`,
-              'User-Agent': 'GitHubCopilotChat/0.35.0', 'Editor-Version': 'vscode/1.107.0',
-              'Editor-Plugin-Version': 'copilot-chat/0.35.0', 'Copilot-Integration-Id': 'vscode-chat',
-              'X-GitHub-Api-Version': '2026-06-01',
+              ...COPILOT_EDITOR_HEADERS,
+              'X-GitHub-Api-Version': '2026-06-01', ...attributionHeaders(),
             },
-            redirect: 'error', signal: AbortSignal.timeout(5000),
+            redirect: 'error', signal: access.signal ? AbortSignal.any([access.signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000),
           })
           if (!response.ok) throw new Error('Copilot metadata unavailable')
           const result = parseCatalog(await response.json(), now())
+          if (access.signal?.aborted) return new Map()
           for (const model of result.values()) {
             if (model.promotion?.endsAt) entry.expiresAt = Math.min(entry.expiresAt, Date.parse(model.promotion.endsAt))
           }

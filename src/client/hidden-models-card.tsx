@@ -15,6 +15,15 @@ function Eye({ visible }: { readonly visible: boolean }) {
   )
 }
 
+/** Action glyphs follow the supplied horizontal Pin and diagonal Unpin references. */
+function Pushpin({ pinned }: { readonly pinned: boolean }) {
+  return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    {pinned
+      ? <path d="m3 21 6-6m-4-4 6-3 3-5a1 1 0 0 1 2 0l6 6a1 1 0 0 1 0 2l-5 3-3 6-9-9Z" />
+      : <path d="M2 12h7m0-5v10l6-3 6 3a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1l-6 3H9Z" />}
+  </svg>
+}
+
 const contextSize = (tokens: number | undefined): string => tokens === undefined ? '—'
   : tokens >= 1_000_000 ? `${Number((tokens / 1_000_000).toFixed(2))}M`
     : tokens >= 1_000 ? `${Number((tokens / 1_000).toFixed(1))}K` : String(tokens)
@@ -37,19 +46,22 @@ function MetadataBadge({ label, details }: { readonly label: string; readonly de
 }
 
 /** All account models stay in this table, including hidden rows, so toggling is reversible. */
-export function ModelsTable({ status, models, busy, onSave }: {
+export function ModelsTable({ status, models, busy, onSave, onSavePins }: {
   readonly status: AuthStatus
   readonly models: readonly CopilotModel[]
   readonly busy: boolean
   readonly onSave: (ids: readonly string[]) => Promise<void>
+  readonly onSavePins: (ids: readonly string[]) => Promise<void>
 }) {
   useLocaleRevision()
   const [filter, setFilter] = useState('')
   const [, refreshPromotion] = useState(0)
   useEffect(() => watchPromotionExpiry(models, () => refreshPromotion(value => value + 1)), [models])
   const hidden = status.hiddenModels ?? []
+  const pinned = status.pinnedModels ?? []
   const query = filter.trim().toLowerCase()
   const shown = models.filter(model => `${model.name}\n${model.id}`.toLowerCase().includes(query))
+    .sort((a, b) => Number(pinned.includes(b.id)) - Number(pinned.includes(a.id)))
   return (
     <>
       <div style={css.toolbar}>
@@ -65,7 +77,7 @@ export function ModelsTable({ status, models, busy, onSave }: {
       <div style={css.viewport} role="region" aria-label={text('hiddenModelsTitle')} tabIndex={0}>
         <table style={css.table} aria-label={text('hiddenModelsTitle')} aria-busy={busy}>
           <thead><tr>
-            <th scope="col" style={{ ...css.heading, width: 48 }}><span title={text('visibility')}>{text('visibility')}</span></th>
+            <th scope="col" style={{ ...css.heading, width: 92 }}><span title={text('modelActions')}>{text('modelActions')}</span></th>
             <th scope="col" style={css.heading}>{text('modelName')}</th>
             <th scope="col" style={css.heading}>{text('contextSize')}</th>
             <th scope="col" style={css.heading}>{text('capabilities')}</th>
@@ -73,13 +85,21 @@ export function ModelsTable({ status, models, busy, onSave }: {
           </tr></thead>
           <tbody>
             {shown.map(model => {
-              const visible = !hidden.includes(model.id)
+              const disabled = model.disabledReason !== undefined
+              const visible = !disabled && !hidden.includes(model.id)
               const label = text(visible ? 'hideModel' : 'showModel', { id: model.name })
-              return <tr key={model.id}>
+              const isPinned = pinned.includes(model.id)
+              const pinLabel = text(isPinned ? 'unpinModel' : 'pinModel', { id: model.name })
+              return <tr key={model.id} aria-disabled={disabled || undefined}>
                 <td style={css.eyeCell}>
-                  <Button type="button" variant="ghost" style={css.eye} aria-label={label} title={label} aria-pressed={visible} disabled={busy || !status.configWritable} onClick={() => { void onSave(visible ? [...hidden, model.id] : hidden.filter(id => id !== model.id)) }}>
-                    <Eye visible={visible} />
-                  </Button>
+                  {disabled ? null : <div style={css.rowActions}>
+                    <Button type="button" variant="ghost" style={css.eye} aria-label={label} title={label} aria-pressed={visible} disabled={busy || !status.configWritable} onClick={() => { void onSave(visible ? [...hidden, model.id] : hidden.filter(id => id !== model.id)) }}>
+                      <Eye visible={visible} />
+                    </Button>
+                    <Button type="button" variant="ghost" style={css.eye} aria-label={pinLabel} title={pinLabel} aria-pressed={isPinned} disabled={busy || !status.configWritable} onClick={() => { void onSavePins(isPinned ? pinned.filter(id => id !== model.id) : [...pinned, model.id]) }}>
+                      <Pushpin pinned={isPinned} />
+                    </Button>
+                  </div>}
                 </td>
                 <td style={css.cell}>
                   <div style={{ ...css.badges, alignItems: 'center' }}>
@@ -91,6 +111,7 @@ export function ModelsTable({ status, models, busy, onSave }: {
                     ].filter(Boolean).join('\n') || text('defaultPricing')} /> : null}
                   </div>
                   {model.name !== model.id ? <div style={css.modelId}>{model.id}</div> : null}
+                  {model.disabledReason ? <div style={css.modelId}>{text(model.disabledReason === 'unsupported-protocol' ? 'modelUnsupportedProtocol' : 'modelNotOffered')}</div> : null}
                 </td>
                 <td style={{ ...css.cell, ...css.numeric }}>{contextSize(model.contextWindow)}</td>
                 <td style={css.cell}>

@@ -18,20 +18,6 @@ export interface LocaleRuntime {
   subscribe(listener: () => void): Dispose
 }
 
-/**
- * Owner props of the Models page `settings.models.provider-card` keyed slot
- * (`@deepseek-ai/dsh-client-ui-settings-models` slot-contract), trimmed to
- * the fields this plugin reads.
- */
-export interface ProviderCardProps {
-  /** The card's directory row; `provider` is the route id, `settingsNs` the dispatch key. */
-  readonly provider: { readonly provider: string; readonly settingsNs: string }
-  /** Whether a profile already configures the route; false on the add-provider draft. */
-  readonly configured: boolean
-  /** Whether the row's api-key credential is confirmed configured. */
-  readonly keyConfigured: boolean
-}
-
 /** `@deepseek-ai/dsh-client-ui-renderer`: the UI slot registry. */
 export interface SlotRegistry {
   /** Layout main panel and matching host-owned sidebar navigation entry. */
@@ -50,20 +36,13 @@ export interface SlotRegistry {
     readonly locale?: string
     readonly inject: () => { readonly onOpen: () => void }
   }, component: ComponentType<{ readonly onOpen: () => void }>): Dispose
-  /** Keyed slot: one entry per `key` and `priority`; a second entry at an occupied cell throws. */
-  register(slot: {
-    readonly name: 'settings.models.provider-card'
-    readonly key: string
-    readonly priority?: number
-    readonly locale?: string
-  }, component: ComponentType<ProviderCardProps>): Dispose
   /** Run `register` whenever the named slot becomes available; its disposer runs when the slot goes away. */
   inject(name: string, register: () => Dispose): void
 }
 
 /** `@deepseek-ai/dsh-api-remotes`: Host events forwarded to the browser. */
 export interface ClientRemote {
-  $on(event: 'credentials/reference-updated' | 'credentials/record-updated', listener: (ref: string) => void): Dispose
+  $on(event: 'credentials/reference-updated' | 'credentials/record-updated' | 'llm/models-updated', listener: (ref: string) => void): Dispose
 }
 
 /** The client plugin context, restricted to the services listed in `inject`. */

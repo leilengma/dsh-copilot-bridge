@@ -60,7 +60,7 @@ const FORM_HEADERS = {
 } as const
 
 /** Request a device code from `domain` (github.com when absent). */
-export async function startDeviceFlow(enterpriseDomain?: string): Promise<DeviceAuthorization> {
+export async function startDeviceFlow(enterpriseDomain?: string, signal?: AbortSignal): Promise<DeviceAuthorization> {
   const domain = enterpriseDomain ?? GITHUB_DOTCOM
   const urls = deviceFlowUrls(domain)
   let response: Response
@@ -69,6 +69,7 @@ export async function startDeviceFlow(enterpriseDomain?: string): Promise<Device
       method: 'POST',
       headers: FORM_HEADERS,
       body: new URLSearchParams({ client_id: OAUTH_CLIENT_ID, scope: OAUTH_SCOPE }).toString(),
+      signal: signal ?? null,
     })
   } catch (cause) {
     throw new CopilotAuthError(`failed to start GitHub device authorization at ${domain}`, 'TRANSPORT', { cause })
@@ -98,10 +99,10 @@ export async function startDeviceFlow(enterpriseDomain?: string): Promise<Device
 }
 
 /** Ask the device's host once whether the user has authorized yet. */
-export async function pollDeviceFlow(device: DeviceAuthorization): Promise<PollResult> {
-  let response: Response
+export async function pollDeviceFlow(device: DeviceAuthorization, signal?: AbortSignal): Promise<PollResult> {
+  let data: AccessTokenResponse
   try {
-    response = await githubFetch(deviceFlowUrls(device.domain).accessTokenUrl, {
+    const response = await githubFetch(deviceFlowUrls(device.domain).accessTokenUrl, {
       method: 'POST',
       headers: FORM_HEADERS,
       body: new URLSearchParams({
@@ -109,12 +110,13 @@ export async function pollDeviceFlow(device: DeviceAuthorization): Promise<PollR
         device_code: device.deviceCode,
         grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
       }).toString(),
+      signal: signal ?? null,
     })
+    if (!response.ok) return { state: 'retry' }
+    data = await response.json() as AccessTokenResponse
   } catch {
     return { state: 'retry' }
   }
-  if (!response.ok) return { state: 'retry' }
-  const data = await response.json() as AccessTokenResponse
   if (typeof data.access_token === 'string' && data.access_token.length > 0) return { state: 'done', token: data.access_token }
   switch (data.error) {
     case 'authorization_pending': return { state: 'retry' }

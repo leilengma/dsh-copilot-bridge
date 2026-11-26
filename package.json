@@ -1,6 +1,6 @@
 {
   "name": "dsh-copilot-bridge",
-  "description": "GitHub Copilot sign-in for DeepSeek Harness, including GitHub Enterprise hosts (e.g. <company>.ghe.com), for its built-in github-copilot route",
+  "description": "GitHub Copilot Bridge provider for DeepSeek Harness with device-flow sign-in, a live model catalog and GitHub Enterprise support; native github-copilot stays untouched",
   "version": "1.0.0",
   "license": "MIT",
   "icon": "assets/github-copilot.svg",
@@ -96,6 +96,7 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.19.0",
+    "@earendil-works/pi-ai": "~1.3.0",
     "undici": "^6.28.0"
   },
   "devDependencies": {
