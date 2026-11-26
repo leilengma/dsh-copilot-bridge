@@ -71,7 +71,7 @@ const ui = bundled.exports as {
 }
 
 const status: TableProps['status'] = {
-  authenticated: true, state: 'authenticated', provider: 'github-copilot', githubHost: 'github.com',
+  authenticated: true, state: 'authenticated', provider: 'copilot-bridge', githubHost: 'github.com',
   enterpriseUrl: '', configWritable: true, availableModels: ['haiku', 'gpt'], hiddenModels: ['gpt'],
 }
 const props: TableProps = {
@@ -151,23 +151,6 @@ test('Account owns sign-in and host controls; Models is absent until authenticat
   assert.doesNotMatch(models, /aria-label="Account usage"/)
 })
 
-test('Account distinguishes provider setup progress/failure from successful authentication', () => {
-  const render = (providerSetup: 'pending' | 'ready' | 'warning') => ui.renderTabs({
-    status: { ...status, providerSetup }, tab: 'account', onTabChange: () => {}, onStatusChange: () => {},
-  })
-  const pending = render('pending')
-  assert.match(pending, /Setting up the GitHub Copilot provider/)
-  assert.match(pending, /Sign out/)
-  const warning = render('warning')
-  assert.match(warning, /Signed in, but automatic provider setup could not complete/)
-  assert.match(warning, /Settings → Models/)
-  assert.match(warning, /leave the API key blank/)
-  assert.match(warning, /Retry provider setup/)
-  assert.match(warning, /Sign out/)
-  assert.doesNotMatch(warning, />Sign in</)
-  assert.doesNotMatch(render('ready'), /Retry provider setup|automatic provider setup could not complete|Setting up/)
-})
-
 test('model table exposes accessible eye toggles, search and real metadata without invented costs', () => {
   const html = ui.renderTable(props)
   assert.match(html, /type="search"/)
@@ -210,15 +193,16 @@ test('a stale response cannot display an already-expired discount', () => {
   assert.match(html, /Retiring/)
 })
 
-test('account discovery notifies model-page subscribers but unrelated records do not', () => {
+test('bridge record updates notify model-page subscribers but other records do not', () => {
   const before = ui.getRevision()
   let notifications = 0
   const unsubscribe = ui.subscribeToRevision(() => { notifications++ })
   try {
     ui.emitRemote('credentials/record-updated', 'another-provider')
+    ui.emitRemote('credentials/record-updated', 'llm-pi-ai/github-copilot')
     assert.equal(ui.getRevision(), before)
     assert.equal(notifications, 0)
-    ui.emitRemote('credentials/record-updated', 'llm-pi-ai/github-copilot')
+    ui.emitRemote('credentials/record-updated', 'copilot-bridge/github')
     assert.equal(ui.getRevision(), before + 1)
     assert.equal(notifications, 1)
   } finally { unsubscribe() }
@@ -226,7 +210,7 @@ test('account discovery notifies model-page subscribers but unrelated records do
 
 test('credential reference changes still refresh Account subscribers without chat integration', () => {
   const before = ui.getRevision()
-  ui.emitRemote('credentials/reference-updated', 'llm-pi-ai/github-copilot')
+  ui.emitRemote('credentials/reference-updated', 'copilot-bridge/github')
   assert.equal(ui.getRevision(), before + 1)
 })
 

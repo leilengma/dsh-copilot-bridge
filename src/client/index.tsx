@@ -2,7 +2,7 @@
  * dsh-copilot-bridge Web client: the Plugins Account/Models tabs.
  */
 import type { ClientContext } from './harness.ts'
-import { PI_AI_RECORD_KEY } from '../shared/contract.ts'
+import { BRIDGE_RECORD_KEY } from '../shared/contract.ts'
 import { DICTIONARIES, LOCALE_NS, bindLocale, text } from './i18n.ts'
 import { CopilotIcon, CopilotPanel, CopilotShortcut } from './navigation.tsx'
 import { CopilotProviderCardNotice } from './provider-card.tsx'
@@ -23,11 +23,11 @@ export function apply(ctx: ClientContext): void {
     `${SECTION_ID}: refresh account after credential changes`,
   )
 
-  // Discovery and visibility edits update the grant record without necessarily
-  // changing its credential reference. Refresh an already-open Models page too.
+  // Sign-in/out rewrites the bridge record without necessarily changing its
+  // credential reference. Refresh an already-open Models page too.
   ctx.effect(
     () => ctx.remote.$on('credentials/record-updated', ref => {
-      if (ref === PI_AI_RECORD_KEY) bumpAuthRevision()
+      if (ref === BRIDGE_RECORD_KEY) bumpAuthRevision()
     }),
     `${SECTION_ID}: refresh discovered models`,
   )

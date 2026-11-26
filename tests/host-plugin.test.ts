@@ -3,14 +3,13 @@ import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { LlmAdapter, LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { createVolatile, updateVolatile } from '@deepseek-ai/cosmokit'
-import { credentialKey, type CredentialRecord } from '@deepseek-ai/dsh-credentials'
+import type { CredentialRecord } from '@deepseek-ai/dsh-credentials'
 import type { ConnectionFetchRoute } from '@deepseek-ai/dsh-client-connection'
 import { apply } from '../src/host/index.ts'
-import type { CredentialStore } from '../src/host/auth-controller.ts'
-import { grantModelIds } from '../src/host/grant.ts'
-import { PI_AI_PROVIDER, PI_AI_RECORD_SCOPE } from '../src/shared/contract.ts'
+import { BRIDGE_RECORD_KEY } from '../src/shared/contract.ts'
+import { bridgeRecordKey } from '../src/host/bridge-credentials.ts'
 
-const PI_AI_RECORD_KEY = credentialKey(PI_AI_RECORD_SCOPE, PI_AI_PROVIDER)
+const bridgeRecord = (token: string): CredentialRecord => ({ kind: 'grant', payload: { type: 'github-oauth', token } })
 
 const settle = () => new Promise(resolve => setImmediate(resolve))
 
@@ -61,7 +60,7 @@ test('the actual LLM catalog boundary hides models even when the adapter ignores
     return (await response.json()).value
   }
   ctx.provide('credentials', {
-    async readRecord() { return { kind: 'grant', payload: { refresh: 'ghu_test' } } },
+    async readRecord() { return bridgeRecord('ghu_test') },
     async modifyRecord() { return undefined },
     async deleteRecord() {},
   })
@@ -88,7 +87,6 @@ test('the actual LLM catalog boundary hides models even when the adapter ignores
   assert.deepEqual((await consumer.resolveModelInfo('github-copilot', 'a')).id, 'a', 'hiding is advisory, not a routing block')
   assert.deepEqual((await consumer.listModels('github-copilot'))[0]?.inputModalities, ['text'])
   const catalog = await management()
-  assert.equal(catalog.status.modelCatalogSource, 'provider')
   assert.deepEqual(catalog.status.availableModels, ['A', 'a', 'b'])
   assert.deepEqual(catalog.models.map((model: { id: string }) => model.id), ['A', 'a', 'b'], 'a grant without account ids must still populate Models before any chat request')
 
@@ -118,11 +116,11 @@ test('sign-out empties cached Copilot selectors while preserving its configured 
     routes.set(route.path, route)
     return async () => { routes.delete(route.path) }
   } } })
-  let record: CredentialRecord | undefined = { kind: 'grant', payload: { refresh: 'ghu_test' } }
+  let record: CredentialRecord | undefined = bridgeRecord('ghu_test')
   ctx.provide('credentials', {
     async readRecord() { return record },
     async modifyRecord() { return record },
-    async deleteRecord() { record = undefined; ctx.emit('credentials/record-updated', PI_AI_RECORD_KEY) },
+    async deleteRecord() { record = undefined; ctx.emit('credentials/record-updated', bridgeRecordKey()) },
   })
   const runtime = new LlmRuntime(ctx)
   runtime.registerAdapter(['github-copilot', 'other'], new StaticCatalog())
@@ -149,18 +147,18 @@ test('sign-out empties cached Copilot selectors while preserving its configured 
     assert.deepEqual(await ctx.llm.listModels('github-copilot'), [])
     assert.ok(ctx.llm.listProviders().some(provider => provider.id === 'github-copilot'))
     assert.equal((await ctx.llm.listModels('other')).length, 3)
-    record = { kind: 'grant', payload: { refresh: 'ghu_test_again' } }
-    ctx.emit('credentials/record-updated', PI_AI_RECORD_KEY)
+    record = bridgeRecord('ghu_test_again')
+    ctx.emit('credentials/record-updated', bridgeRecordKey())
     await settle()
     assert.deepEqual(cached, ['a', 'b', 'A'], 'a new sign-in must repopulate existing selectors without a restart')
     record = undefined
-    ctx.emit('credentials/record-updated', PI_AI_RECORD_KEY)
+    ctx.emit('credentials/record-updated', bridgeRecordKey())
     await settle()
     assert.deepEqual(cached, [], 'external credential deletion also invalidates cached selectors')
   } finally { await ctx.fiber.dispose() }
 })
 
-test('Host mount, pi-ai record events, and volatile YAML edits re-filter without a status request', async () => {
+test('Host mount, record events, and volatile YAML edits never write credentials', async () => {
   const ctx = new Context()
   const routes = new Map<string, ConnectionFetchRoute>()
   ctx.provide('connection', { fetch: { register(route: ConnectionFetchRoute) {
@@ -168,27 +166,16 @@ test('Host mount, pi-ai record events, and volatile YAML edits re-filter without
     return async () => { routes.delete(route.path) }
   } } })
   const hiddenModels = createVolatile(['a', 'removed'])
-  let record: CredentialRecord | undefined = { kind: 'grant', payload: { refresh: 'ghu_test', availableModelIds: ['a', 'b'] } }
+  const record = bridgeRecord('ghu_test')
   let writes = 0
-  const credentials: CredentialStore = {
-    async readRecord() { return record },
-    async modifyRecord(_key, update) {
-      const next = await update(record)
-      if (next !== undefined) {
-        record = next
-        writes++
-        ctx.emit('credentials/record-updated', PI_AI_RECORD_KEY)
-      }
-      return record
-    },
-    async deleteRecord() { record = undefined },
-  }
   apply(ctx, { enterpriseUrl: createVolatile(''), hiddenModels })
   // Credential service can mount after the bridge.
-  ctx.provide('credentials', credentials)
+  ctx.provide('credentials', {
+    async readRecord(key: string) { return key === BRIDGE_RECORD_KEY ? record : undefined },
+    async modifyRecord() { writes++; return undefined },
+    async deleteRecord() { writes++ },
+  })
   await settle()
-  assert.deepEqual(grantModelIds(record), ['b'])
-  assert.equal(writes, 1)
   assert.ok(routes.has('/api/copilot-bridge/hidden-models'))
   // No settings/profile entry: stale ids must not prevent the read-only UI loading.
   const statusRoute = routes.get('/api/copilot-bridge/status')
@@ -197,42 +184,18 @@ test('Host mount, pi-ai record events, and volatile YAML edits re-filter without
   assert.equal(response.status, 200)
   const status = (await response.json()).value
   assert.equal(status.configWritable, false)
-  assert.deepEqual(status.hiddenModels, ['a'])
+  assert.deepEqual(status.hiddenModels, ['a', 'removed'], 'saved ids are reported as-is while the catalog is unknown')
   assert.deepEqual(hiddenModels.get(), ['a', 'removed'])
   const runtime = new LlmRuntime(ctx)
   runtime.registerAdapter(['github-copilot'], new StaticCatalog())
   await settle()
-  const modelsRoute = routes.get('/api/copilot-bridge/models')
-  assert.ok(modelsRoute)
-  const catalogResponse = await modelsRoute.fetch(new Request('https://localhost/api/copilot-bridge/models'))
-  assert.equal(catalogResponse.status, 200)
-  const catalog = (await catalogResponse.json()).value
-  assert.deepEqual(catalog.models, [
-    { id: 'a', name: 'Model a', inputModalities: ['text'] },
-    { id: 'b', name: 'Model b', inputModalities: ['text'] },
-  ], 'the authenticated management route must retain hidden account models without grant secrets')
-  assert.deepEqual((await ctx.llm.listModels('github-copilot')).map(model => model.id), ['b', 'A'])
 
-  record = { kind: 'grant', payload: { refresh: 'ghu_test', availableModelIds: ['a', 'b', 'c'] } }
-  ctx.emit('credentials/record-updated', PI_AI_RECORD_KEY)
-  await settle()
-  assert.deepEqual(grantModelIds(record), ['b', 'c'])
-  assert.equal(writes, 2)
-
+  ctx.emit('credentials/record-updated', bridgeRecordKey())
   updateVolatile(hiddenModels, createVolatile(['b']))
   ctx.emit('loader/volatile-update', [['hiddenModels']])
   await settle()
-  assert.deepEqual(grantModelIds(record), ['a', 'c'])
-  assert.equal(writes, 3)
-
-  ctx.emit('credentials/record-updated', credentialKey('other', 'provider'))
-  await settle()
-  assert.equal(writes, 3)
+  assert.equal(writes, 0, 'hidden models live in the profile, never in a credential record')
 
   await ctx.fiber.dispose()
   assert.equal(routes.size, 0)
-  record = { kind: 'grant', payload: { refresh: 'ghu_test', availableModelIds: ['a', 'b'] } }
-  ctx.emit('credentials/record-updated', PI_AI_RECORD_KEY)
-  await settle()
-  assert.deepEqual(grantModelIds(record), ['a', 'b'])
 })

@@ -1,5 +1,6 @@
-import { credentialKey, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
-import { PI_AI_PROVIDER, PI_AI_RECORD_SCOPE, type CopilotModel, type ModelPrices } from '../shared/contract.ts'
+import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
+import type { CopilotModel, ModelPrices } from '../shared/contract.ts'
+import { readBridgeAccount } from './bridge-credentials.ts'
 import { githubFetch } from './transport.ts'
 
 export type CopilotMetadata = Pick<CopilotModel, 'pricing' | 'longContextPricing' | 'defaultContextMax' | 'promotion' | 'retiring'>
@@ -71,19 +72,31 @@ function parseCatalog(raw: unknown, now: number): Metadata {
   return result
 }
 
-/** Only approved Copilot hosts or the host of the stored Enterprise grant receive the token. */
-function modelsUrl(token: string, enterprise: unknown): string {
+/** Only approved Copilot hosts or the stored Enterprise host receive the token. */
+function modelsUrl(token: string, enterprise: string | undefined): string {
   const proxy = token.match(/(?:^|;)proxy-ep=([^;]+)/)?.[1]?.replace(/^proxy\./, 'api.')
   if (proxy && /^api(?:\.[a-z0-9-]+)?\.githubcopilot\.com$/.test(proxy)) return `https://${proxy}/models`
-  if (typeof enterprise === 'string' && /^[a-z0-9]+(?:[.-][a-z0-9]+)*\.[a-z]{2,}$/.test(enterprise)) {
+  if (enterprise !== undefined && /^[a-z0-9]+(?:[.-][a-z0-9]+)*\.[a-z]{2,}$/.test(enterprise)) {
     return `https://copilot-api.${enterprise}/models`
   }
   return 'https://api.individual.githubcopilot.com/models'
 }
 
-/** Reuse the route-owned access token; never exchange, persist or expose credentials here. */
+/** Short-lived Copilot access token, held in host memory by the bridge. */
+export interface CopilotAccessToken {
+  readonly token: string
+  /** Epoch milliseconds. */
+  readonly expiresAt: number
+}
+
+/**
+ * Reuse the bridge's access token; never exchange, persist or expose credentials here.
+ * Signed-in state and Enterprise host come from `copilot-bridge/github`.
+ */
 export function createCopilotMetadata(deps: {
   readonly credentials: () => Pick<CredentialProvider, 'readRecord'> | undefined
+  /** Current access token, or undefined while none is available. Without it, metadata is empty. */
+  readonly accessToken?: () => Promise<CopilotAccessToken | undefined>
   readonly fetch?: typeof githubFetch
   readonly now?: () => number
 }): () => Promise<Metadata> {
@@ -92,15 +105,15 @@ export function createCopilotMetadata(deps: {
   let cache: { token: string; url: string; expiresAt: number; value: Promise<Metadata> } | undefined
   return async () => {
     try {
-      const record = await deps.credentials()?.readRecord(credentialKey(PI_AI_RECORD_SCOPE, PI_AI_PROVIDER))
-      const grant = record?.kind === 'grant' ? object(record.payload) : undefined
-      const expires = number(grant?.expires)
-      if (grant?.type !== 'oauth' || typeof grant.access !== 'string' || !grant.access || expires === undefined || expires <= now()) {
+      const account = await readBridgeAccount(deps.credentials())
+      const access = account === undefined ? undefined : await deps.accessToken?.()
+      const expires = number(access?.expiresAt)
+      if (account === undefined || typeof access?.token !== 'string' || !access.token || expires === undefined || expires <= now()) {
         cache = undefined
         return new Map()
       }
-      const token = grant.access
-      const url = modelsUrl(token, grant.enterpriseUrl)
+      const { token } = access
+      const url = modelsUrl(token, account.enterpriseHost)
       if (cache?.token === token && cache.url === url && cache.expiresAt > now()) return cache.value
       const entry = { token, url, expiresAt: Math.min(now() + 300_000, expires), value: Promise.resolve<Metadata>(new Map()) }
       cache = entry

@@ -1,14 +1,18 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import { createCopilotUsage } from '../src/host/copilot-usage.ts'
 
-const record = (refresh = 'secret-token', enterpriseUrl?: string) => ({ kind: 'grant' as const, payload: { type: 'oauth', refresh, access: '', expires: 0, ...(enterpriseUrl ? { enterpriseUrl } : {}) } })
+const record = (token = 'secret-token', enterpriseHost?: string) => ({ kind: 'grant' as const, payload: { type: 'github-oauth', token, ...(enterpriseHost ? { enterpriseHost } : {}) } })
 const quota = { token_based_billing: true, quota_reset_date_utc: '2026-12-01T00:00:00Z', quota_snapshots: {
   premium_interactions: { entitlement: 100000, quota_remaining: 53916.3, percent_remaining: 53.9, unlimited: false, credits_used: 46084 },
 } }
 
 test('account usage projects exact credits from remaining quota without exposing credentials or raw account data', async () => {
-  const read = createCopilotUsage({ credentials: () => ({ readRecord: async () => record() }), fetch: async (url, init) => {
+  const read = createCopilotUsage({ credentials: () => ({ readRecord: async key => {
+    assert.deepEqual(key, credentialKey('copilot-bridge', 'github'), 'reads only the bridge record')
+    return record()
+  } }), fetch: async (url, init) => {
     assert.equal(url, 'https://api.github.com/copilot_internal/user')
     assert.equal(new Headers(init?.headers).get('authorization'), 'token secret-token')
     assert.equal(init?.redirect, 'error')
@@ -20,7 +24,7 @@ test('account usage projects exact credits from remaining quota without exposing
   assert.doesNotMatch(JSON.stringify(result), /secret|email|private|access|refresh/)
 })
 
-test('usage uses the grant issuer, not a configured host, and handles request-based/unlimited plans', async () => {
+test('usage uses the stored issuer, not a configured host, and handles request-based/unlimited plans', async () => {
   const read = createCopilotUsage({ credentials: () => ({ readRecord: async () => record('enterprise-secret', 'acme.ghe.com') }), fetch: async url => {
     assert.equal(url, 'https://api.acme.ghe.com/copilot_internal/user')
     return Response.json({ quota_snapshots: { premium_interactions: { unlimited: true, credits_used: 123, quota_reset_at: 1893456000 } } })
