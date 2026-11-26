@@ -402,6 +402,28 @@ test('completed device sign-in clears hidden config, discovers the live catalog 
   assert.equal(h.exchanges, 1)
 })
 
+test('401 token replacement triggers live discovery as well as a single safe inference retry', async t => {
+  const h = host(t)
+  await h.picker()
+  h.discover(async () => Response.json({ data: modelsPayload.data.filter(row => row.id === 'gemini-3-pro') }))
+  let calls = 0
+  h.infer(async () => {
+    if (++calls === 1) return Response.json({ error: { message: 'expired', type: 'error' } }, { status: 401 })
+    const events = [
+      { id: 'c1', object: 'chat.completion.chunk', created: 0, model: 'gemini-3-pro', choices: [{ index: 0, delta: { role: 'assistant', content: 'ok' }, finish_reason: null }] },
+      { id: 'c1', object: 'chat.completion.chunk', created: 0, model: 'gemini-3-pro', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+    ]
+    return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } })
+  })
+  const chunks = await collect(h.runtime.stream({ provider: BRIDGE_PROVIDER, model: 'gemini-3-pro', messages: [] }))
+  assert.equal(calls, 2)
+  assert.equal(h.exchanges, 2)
+  assert.ok(chunks.some(chunk => chunk.type === 'finish' && chunk.reason.kind === 'stop'))
+  assert.deepEqual(await h.picker(), ['gemini-3-pro'])
+  const modelRequests = h.requests.filter(request => request.url.endsWith('/models'))
+  assert.equal(new Headers(modelRequests.at(-1)?.init?.headers).get('authorization'), 'Bearer fixture-access-2')
+})
+
 test('pending management metadata is cancelled and cannot cross sign-out or unload', async t => {
   const h = host(t)
   await h.picker()
