@@ -4,7 +4,7 @@ import type { AuthController } from './auth-controller.ts'
 import { InvalidHiddenModelsError } from './hidden-models.ts'
 import { modelCatalog } from './model-catalog.ts'
 import type { CopilotMetadata } from './copilot-metadata.ts'
-import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
+import type { LiveCatalog } from './live-catalog.ts'
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
@@ -35,14 +35,19 @@ async function readEnterpriseUrlRequest(request: Request): Promise<string> {
 /** Registered exclusively on the authenticated connection.fetch channel. */
 export function authRoutes(
   auth: AuthController,
-  runtime: () => Pick<LlmRuntime, 'resolveModelInfo'> | undefined = () => undefined,
+  catalog?: LiveCatalog,
   metadata?: () => Promise<ReadonlyMap<string, CopilotMetadata>>,
   usage: () => Promise<CopilotUsage> = async () => ({ state: 'unavailable' }),
+  vision: () => boolean = () => true,
 ): ConnectionFetchRoute[] {
   return [
     { path: `${API_BASE}/usage`, methods: ['GET'], requestBody: 'buffered', fetch: route(() => usage()) },
     { path: `${API_BASE}/status`, methods: ['GET'], requestBody: 'buffered', fetch: route(() => auth.status()) },
-    { path: `${API_BASE}/models`, methods: ['GET'], requestBody: 'buffered', fetch: route(async () => modelCatalog(await auth.status(), runtime(), metadata)) },
+    { path: `${API_BASE}/models`, methods: ['GET'], requestBody: 'buffered', fetch: route(async () => modelCatalog(await auth.status(), catalog, metadata, vision())) },
+    { path: `${API_BASE}/models/refresh`, methods: ['POST'], requestBody: 'buffered', fetch: route(async () => {
+      if ((await auth.status()).authenticated) await catalog?.refresh().catch(() => {})
+      return modelCatalog(await auth.status(), catalog, metadata, vision())
+    }) },
     { path: `${API_BASE}/login`, methods: ['POST'], requestBody: 'buffered', fetch: route(() => auth.login()) },
     { path: `${API_BASE}/logout`, methods: ['POST'], requestBody: 'buffered', fetch: route(() => auth.logout()) },
     {

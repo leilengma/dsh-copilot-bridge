@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { credentialKey, type CredentialKey, type CredentialRecord } from '@deepseek-ai/dsh-credentials'
-import { createAuthController, type BridgeConfig } from '../src/host/auth-controller.ts'
+import { createAuthController, type AuthControllerDeps, type BridgeConfig } from '../src/host/auth-controller.ts'
 import type { BridgeAccount, CredentialStore } from '../src/host/bridge-credentials.ts'
 import type { DeviceAuthorization, PollResult } from '../src/host/device-flow.ts'
 import { authRoutes } from '../src/host/routes.ts'
@@ -47,6 +47,7 @@ interface Harness {
   readonly polls: PollResult[]
   readonly warnings: string[]
   readonly signedIn: BridgeAccount[]
+  readonly timerDelays: number[]
   signedOut: number
   /** Catalog ids the controller sees; undefined while unknown. */
   catalog: readonly string[] | undefined
@@ -55,27 +56,28 @@ interface Harness {
   readonly controller: ReturnType<typeof createAuthController>
 }
 
-function harness(): Harness {
+function harness(options: { startDeviceFlow?: AuthControllerDeps['startDeviceFlow'] } = {}): Harness {
   const credentials = new FakeCredentials()
   const config = new FakeConfig()
   let timer: (() => void) | undefined
   const h: Harness = {
-    credentials, config, started: [], polls: [], warnings: [], signedIn: [], signedOut: 0, catalog: undefined,
+    credentials, config, started: [], polls: [], warnings: [], signedIn: [], timerDelays: [], signedOut: 0, catalog: undefined,
     controller: createAuthController({
       credentials: () => credentials,
       config,
       catalogIds: async () => h.catalog,
       onSignedIn: account => { h.signedIn.push(account) },
       onSignedOut: () => { h.signedOut++ },
-      async startDeviceFlow(domain): Promise<DeviceAuthorization> {
+      async startDeviceFlow(domain, signal): Promise<DeviceAuthorization> {
         h.started.push(domain)
+        if (options.startDeviceFlow) return options.startDeviceFlow(domain, signal)
         const host = domain ?? 'github.com'
         return { domain: host, deviceCode: 'dev', userCode: 'ABCD-1234', verificationUri: `https://${host}/login/device`, interval: 5, expiresIn: 900 }
       },
       async pollDeviceFlow() { return h.polls.shift() ?? { state: 'retry' } },
       logger: { info() {}, warn(message) { h.warnings.push(message) }, error() {} },
       now: () => 0,
-      setTimer: callback => { timer = callback; return 1 },
+      setTimer: (callback, ms) => { h.timerDelays.push(ms); timer = callback; return 1 },
       clearTimer: () => { timer = undefined },
     }),
     async tick() {
@@ -311,6 +313,34 @@ test('refuses to save when the configuration is not writable', async () => {
   h.config.canWrite = false
   await assert.rejects(h.controller.setEnterpriseUrl('octocorp.ghe.com'), /settings service/)
 })
+
+for (const lifecycle of ['dispose', 'logout', 'host-switch'] as const) {
+  test(`${lifecycle} during device authorization aborts the request and its late response cannot schedule polling`, async () => {
+    let release!: (device: DeviceAuthorization) => void
+    const response = new Promise<DeviceAuthorization>(resolve => { release = resolve })
+    let signal: AbortSignal | undefined
+    const h = harness({ startDeviceFlow: async (_domain, requestSignal) => { signal = requestSignal; return response } })
+    const pending = h.controller.login()
+    const cancelled = assert.rejects(pending, /cancelled/)
+    await new Promise(resolve => setImmediate(resolve))
+    if (lifecycle === 'dispose') h.controller.dispose()
+    else if (lifecycle === 'logout') await h.controller.logout()
+    else {
+      await h.controller.setEnterpriseUrl('acme.ghe.com')
+      await h.controller.setEnterpriseUrl('')
+    }
+    release({ domain: 'github.com', deviceCode: 'late-device', userCode: 'LATE-CODE', verificationUri: 'https://github.com/login/device', interval: 5, expiresIn: 900 })
+    await cancelled
+    assert.equal(signal?.aborted, true)
+    assert.deepEqual(h.timerDelays, [])
+    h.polls.push({ state: 'done', token: 'ghu_stale' })
+    await h.tick()
+    assert.equal((await h.controller.status()).state, 'signed-out')
+    assert.deepEqual(h.signedIn, [])
+    assert.equal(h.credentials.records.size, 0)
+    if (lifecycle === 'dispose') await assert.rejects(h.controller.login(), /disposed/)
+  })
+}
 
 test('changing the host cancels a pending device flow', async () => {
   const h = harness()

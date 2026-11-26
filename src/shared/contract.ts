@@ -16,9 +16,6 @@ export const BRIDGE_RECORD_SCOPE = 'copilot-bridge'
 export const BRIDGE_RECORD_ID = 'github'
 export const BRIDGE_RECORD_KEY = `${BRIDGE_RECORD_SCOPE}/${BRIDGE_RECORD_ID}`
 
-/** Native pi-ai route; still wrapped until the bridge adapter replaces it. */
-export const PI_AI_PROVIDER = 'github-copilot'
-
 /** The public GitHub host, used when no enterprise host is configured. */
 export const GITHUB_DOTCOM = 'github.com'
 

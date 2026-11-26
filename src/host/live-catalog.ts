@@ -3,10 +3,12 @@
  * validation and projection into protocol-bound catalog entries (spec D8,
  * D9, D11, D12, D13). The raw payload is never kept, logged or exposed.
  */
+import { attributionHeaders } from '@deepseek-ai/dsh-llm'
+import type { ModelProtocol, ModelDisabledReason, CatalogState as ModelCatalogState } from '../shared/contract.ts'
 import { githubFetch } from './transport.ts'
 
-export type CatalogProtocol = 'anthropic-messages' | 'openai-responses' | 'openai-completions'
-export type DisabledReason = 'unsupported-protocol' | 'not-offered'
+export type CatalogProtocol = ModelProtocol
+export type DisabledReason = ModelDisabledReason
 export type CatalogInput = 'text' | 'image'
 
 interface CatalogModelBase {
@@ -92,8 +94,7 @@ export interface CatalogSnapshot {
 }
 
 export type CatalogState =
-  | { readonly status: 'loading' }
-  | { readonly status: 'ready' }
+  | { readonly status: Exclude<ModelCatalogState, 'error'> }
   | { readonly status: 'error'; readonly error: string }
 
 export interface LiveCatalogDeps {
@@ -119,7 +120,7 @@ export interface LiveCatalog {
 
 const COPILOT_HEADERS = {
   Accept: 'application/json',
-  'User-Agent': 'GitHubCopilotChat/0.35.0',
+  'user-agent': 'GitHubCopilotChat/0.35.0',
   'Editor-Version': 'vscode/1.107.0',
   'Editor-Plugin-Version': 'copilot-chat/0.35.0',
   'Copilot-Integration-Id': 'vscode-chat',
@@ -163,22 +164,29 @@ export function createLiveCatalog(deps: LiveCatalogDeps): LiveCatalog {
   async function discover(abort: AbortController, started: number): Promise<CatalogSnapshot> {
     const live = () => { if (started !== epoch) throw cancelled() }
     try {
-      const access = await deps.token()
-      live()
-      const url = modelsUrl(access.baseUrl)
-      const response = await fetch(url, {
-        headers: { ...COPILOT_HEADERS, Authorization: `Bearer ${access.token}` },
-        redirect: 'error', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(timeoutMs)]),
-      })
-      live()
-      if (!response.ok) throw new Error(`Copilot model discovery failed (HTTP ${response.status})`)
-      const payload: unknown = await response.json().catch(() => undefined)
-      live()
-      const snapshot: CatalogSnapshot = { generation: access.generation, models: projectCatalog(payload) }
-      current = snapshot
-      status = { status: 'ready' }
-      emit()
-      return snapshot
+      let access = await deps.token()
+      for (;;) {
+        live()
+        const url = modelsUrl(access.baseUrl)
+        const response = await fetch(url, {
+          headers: { ...COPILOT_HEADERS, Authorization: `Bearer ${access.token}`, ...attributionHeaders() },
+          redirect: 'error', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(timeoutMs)]),
+        })
+        live()
+        if (!response.ok) throw new Error(`Copilot model discovery failed (HTTP ${response.status})`)
+        const payload: unknown = await response.json().catch(() => undefined)
+        live()
+        const models = projectCatalog(payload)
+        const latest = await deps.token()
+        live()
+        // A refresh may have joined this discovery while its old response was pending.
+        if (latest.generation !== access.generation) { access = latest; continue }
+        const snapshot: CatalogSnapshot = { generation: access.generation, models }
+        current = snapshot
+        status = { status: 'ready' }
+        emit()
+        return snapshot
+      }
     } catch (error) {
       if (started !== epoch) throw cancelled()
       // Only messages produced above cross the boundary; foreign errors may carry secrets.
@@ -217,11 +225,15 @@ export function createLiveCatalog(deps: LiveCatalogDeps): LiveCatalog {
   return {
     refresh,
     async ready() {
+      const started = epoch
       if (!inFlight && current) return current
       try {
-        return await refresh()
+        const snapshot = await refresh()
+        if (started !== epoch) throw cancelled()
+        return snapshot
       } catch (error) {
-        // A failed refresh is non-destructive: the last good snapshot stays usable.
+        // A failed refresh is non-destructive only within the same account/host epoch.
+        if (started !== epoch) throw cancelled()
         if (current) return current
         throw error
       }

@@ -167,9 +167,12 @@ test('a failed refresh keeps the current token, logs no secrets and retries late
   assert.deepEqual(timers.delays, [60_000])
 })
 
-test('invalidate after a 401 triggers exactly one re-exchange', async () => {
+test('invalidate after a 401 triggers one re-exchange and refresh notification without changing account lifetime', async () => {
   const { tokens, calls } = setup()
+  const refreshed: number[] = []
+  tokens.onRefresh(value => refreshed.push(value.generation))
   const stale = await tokens.current()
+  assert.deepEqual(refreshed, [], 'initial exchange must not recursively trigger discovery')
   tokens.invalidate(stale)
   tokens.invalidate(stale)
   const [a, b] = await Promise.all([tokens.current(), tokens.current()])
@@ -178,6 +181,15 @@ test('invalidate after a 401 triggers exactly one re-exchange', async () => {
   assert.equal(a, b)
   assert.equal(calls.length, 2)
   assert.notEqual(a.generation, stale.generation)
+  assert.equal(a.accountGeneration, stale.accountGeneration)
+  assert.equal(a.signal, stale.signal)
+  assert.equal(stale.signal.aborted, false)
+  assert.deepEqual(refreshed, [a.generation])
+  tokens.reset()
+  assert.equal(a.signal.aborted, true)
+  const next = await tokens.current()
+  assert.notEqual(next.accountGeneration, a.accountGeneration)
+  assert.deepEqual(refreshed, [a.generation], 'first exchange after reset is not a refresh')
 })
 
 test('reset during an in-flight exchange discards its result', async () => {

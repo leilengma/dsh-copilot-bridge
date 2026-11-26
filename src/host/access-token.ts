@@ -7,6 +7,7 @@
  * carries a `generation`, so a prepared call can bind token and base URL from
  * one generation. `reset()` (sign-out, host switch) discards in-flight results.
  */
+import { attributionHeaders } from '@deepseek-ai/dsh-llm'
 import { githubFetch } from './transport.ts'
 
 /** The stored GitHub account: OAuth token plus optional Enterprise host. */
@@ -23,6 +24,10 @@ export interface AccessToken {
   readonly expiresAt: number
   /** Increments per exchanged token; differs across accounts, hosts and refreshes. */
   readonly generation: number
+  /** Stable across token refreshes, changes on reset or account/host replacement. */
+  readonly accountGeneration: number
+  /** Aborted when this account is reset, replaced or disposed (not on token refresh). */
+  readonly signal: AbortSignal
 }
 
 export type AccessTokenErrorReason =
@@ -56,7 +61,7 @@ export interface AccessTokens {
   current(signal?: AbortSignal): Promise<AccessToken>
   /** Drop `token` after a 401 so the next `current()` re-exchanges once; stale tokens are ignored. */
   invalidate(token: AccessToken): void
-  /** Called after each scheduled refresh; returns an unsubscribe function. */
+  /** Called after every successful replacement exchange (not the first after reset). */
   onRefresh(listener: (token: AccessToken) => void): () => void
   /** Forget the token, cancel the refresh timer and discard in-flight exchanges. */
   reset(): void
@@ -66,7 +71,7 @@ export interface AccessTokens {
 
 const COPILOT_HEADERS = {
   Accept: 'application/json',
-  'User-Agent': 'GitHubCopilotChat/0.35.0',
+  'user-agent': 'GitHubCopilotChat/0.35.0',
   'Editor-Version': 'vscode/1.107.0',
   'Editor-Plugin-Version': 'copilot-chat/0.35.0',
   'Copilot-Integration-Id': 'vscode-chat',
@@ -119,6 +124,10 @@ export function createAccessTokens(deps: AccessTokenDeps): AccessTokens {
   let timer: unknown
   let epoch = 0
   let generation = 0
+  let accountGeneration = 0
+  let accountKey: string | undefined
+  let accountAbort = new AbortController()
+  let exchanged = false
   let disposed = false
 
   const keyOf = (account: CopilotAccount) => `${account.enterpriseHost ?? ''}\n${account.token}`
@@ -142,7 +151,7 @@ export function createAccessTokens(deps: AccessTokenDeps): AccessTokens {
     let response: Response
     try {
       response = await fetch(`https://api.${host ?? 'github.com'}/copilot_internal/v2/token`, {
-        headers: { ...COPILOT_HEADERS, Authorization: `Bearer ${account.token}` },
+        headers: { ...COPILOT_HEADERS, Authorization: `Bearer ${account.token}`, ...attributionHeaders() },
         redirect: 'error',
         signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
       })
@@ -185,9 +194,23 @@ export function createAccessTokens(deps: AccessTokenDeps): AccessTokens {
       try {
         const result = await request(account, entry.controller.signal)
         if (inflight !== entry) throw new AccessTokenError('reset', 'Copilot token exchange was discarded')
-        const value: AccessToken = { token: result.token, baseUrl: result.baseUrl, expiresAt: result.expiresAt, generation: ++generation }
+        const value: AccessToken = {
+          token: result.token, baseUrl: result.baseUrl, expiresAt: result.expiresAt, generation: ++generation,
+          accountGeneration, signal: accountAbort.signal,
+        }
         cached = { key, value }
         schedule(Math.min(result.refreshMs, result.expiresAt - now() - EXPIRY_MARGIN_MS))
+        const replacement = exchanged
+        exchanged = true
+        if (replacement) {
+          for (const listener of [...listeners]) {
+            try {
+              listener(value)
+            } catch (error) {
+              deps.logger?.warn(`Copilot access-token refresh listener failed: ${error instanceof Error ? error.name : 'error'}`)
+            }
+          }
+        }
         return value
       } finally {
         if (inflight === entry) inflight = undefined
@@ -202,14 +225,7 @@ export function createAccessTokens(deps: AccessTokenDeps): AccessTokens {
       const account = await deps.readAccount()
       if (started !== epoch || !account?.token || cached?.key !== keyOf(account)) return
       // The current token stays usable until the replacement arrives.
-      const value = await exchange(account, keyOf(account))
-      for (const listener of [...listeners]) {
-        try {
-          listener(value)
-        } catch (error) {
-          deps.logger?.warn(`Copilot access-token refresh listener failed: ${error instanceof Error ? error.name : 'error'}`)
-        }
-      }
+      await exchange(account, keyOf(account))
     } catch (error) {
       if (started !== epoch || (error instanceof AccessTokenError && error.reason === 'reset')) return
       deps.logger?.warn(`Copilot access-token refresh failed: ${error instanceof AccessTokenError ? error.message : 'unexpected error'}`)
@@ -228,9 +244,13 @@ export function createAccessTokens(deps: AccessTokenDeps): AccessTokens {
 
   function reset() {
     epoch++
+    accountAbort.abort(new Error('Copilot account changed'))
+    accountAbort = new AbortController()
+    accountKey = undefined
     inflight?.controller.abort()
     inflight = undefined
     cached = undefined
+    exchanged = false
     cancelTimer()
   }
 
@@ -246,6 +266,12 @@ export function createAccessTokens(deps: AccessTokenDeps): AccessTokens {
         throw new AccessTokenError('signed-out', 'Not signed in to GitHub Copilot')
       }
       const key = keyOf(account)
+      if (accountKey !== key) {
+        accountAbort.abort(new Error('Copilot account changed'))
+        accountAbort = new AbortController()
+        accountKey = key
+        accountGeneration++
+      }
       if (cached?.key === key && cached.value.expiresAt - now() > EXPIRY_MARGIN_MS) return cached.value
       if (cached?.key !== key) {
         cached = undefined

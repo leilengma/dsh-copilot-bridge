@@ -10,17 +10,17 @@ import { modelsPayload } from './fixtures/copilot-models.ts'
 
 const BASE = 'https://api.enterprise.githubcopilot.com'
 const snapshot: CatalogSnapshot = { generation: 1, models: projectCatalog(modelsPayload) }
-const token = (generation: number, baseUrl = BASE): AccessToken =>
-  ({ token: `tok-${generation}`, baseUrl, expiresAt: Date.now() + 3_600_000, generation })
+const token = (generation: number, baseUrl = BASE, accountGeneration = 1): AccessToken =>
+  ({ token: `tok-${generation}`, baseUrl, expiresAt: Date.now() + 3_600_000, generation, accountGeneration, signal: new AbortController().signal })
 
-interface Request { readonly url: string; readonly headers: Headers; readonly body: Record<string, unknown> }
+interface Request { readonly url: string; readonly headers: Headers; readonly body: Record<string, unknown>; readonly redirect: RequestRedirect | undefined }
 
 /** Fake HTTP endpoint: records requests and answers from a queue of response factories. */
 function fakeFetch(...responses: ((init: RequestInit | undefined) => Response)[]) {
   const requests: Request[] = []
   const fetch = (async (input: string | URL | globalThis.Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-    requests.push({ url, headers: new Headers(init?.headers), body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> })
+    requests.push({ url, headers: new Headers(init?.headers), body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>, redirect: init?.redirect })
     const next = responses.shift()
     if (!next) throw new Error('unexpected request')
     return next(init)
@@ -86,7 +86,7 @@ function fakeTokens(initial: AccessToken) {
       current: async () => current,
       invalidate(stale: AccessToken) {
         invalidated.push(stale.generation)
-        if (stale.generation === current.generation) current = token(current.generation + 1, current.baseUrl)
+        if (stale.generation === current.generation) current = token(current.generation + 1, current.baseUrl, current.accountGeneration)
       },
     },
   }
@@ -163,8 +163,9 @@ test('reasoning efforts are the advertised pi-ai levels only and omitted when no
   assert.equal(await efforts('grok-4.7'), undefined)
 })
 
-test('input modalities: image only for vision models, never pdf', async () => {
-  const { instance } = adapter()
+test('input modalities: image only for vision models with an image loader, never pdf', async () => {
+  assert.deepEqual((await adapter().instance.resolveModel('copilot-bridge', 'gemini-3-pro')).inputModalities, ['text'])
+  const { instance } = adapter({ loadImage: async () => ({ data: 'aGVsbG8=', mimeType: 'image/png' }) })
   assert.deepEqual((await instance.resolveModel('copilot-bridge', 'gemini-3-pro')).inputModalities, ['text', 'image'])
   assert.deepEqual((await instance.resolveModel('copilot-bridge', 'kimi-k3')).inputModalities, ['text'])
 })
@@ -176,6 +177,7 @@ test('mai-code-2 streams over the Responses endpoint with Copilot auth, attribut
   const chunks = await collect(instance.stream(request('mai-code-2')))
   const [sent] = http.requests
   assert.equal(sent?.url, `${BASE}/responses`)
+  assert.equal(sent.redirect, 'error')
   assert.equal(sent.body.model, 'mai-code-2')
   assert.equal(sent.body.stream, true)
   assert.equal(sent.headers.get('authorization'), 'Bearer tok-1')
@@ -197,6 +199,7 @@ test('Claude streams over Anthropic Messages with Bearer auth and budget thinkin
   const chunks = await collect(instance.stream(request('claude-sonnet-5', { reasoningEffort: ReasoningEffortId('medium') })))
   const [sent] = http.requests
   assert.equal(sent?.url.split('?')[0], `${BASE}/v1/messages`)
+  assert.equal(sent.redirect, 'error')
   assert.equal(sent.body.model, 'claude-sonnet-5')
   assert.equal(sent.headers.get('authorization'), 'Bearer tok-1')
   assert.equal(sent.headers.get('x-api-key'), null)
@@ -221,6 +224,7 @@ test('Gemini streams over Chat Completions', async () => {
   const chunks = await collect(instance.stream(request('gemini-3-pro')))
   const [sent] = http.requests
   assert.equal(sent?.url, `${BASE}/chat/completions`)
+  assert.equal(sent.redirect, 'error')
   assert.equal(sent.body.model, 'gemini-3-pro')
   assert.equal(sent.headers.get('authorization'), 'Bearer tok-1')
   assert.equal(sent.headers.get('user-agent'), attributionHeaders()['user-agent'])
@@ -257,6 +261,28 @@ test('fragmented and parallel tool calls map to interleaved tool-call chunks', a
   assert.deepEqual(ends.map(block => block.type === 'tool-call' ? [block.name, JSON.parse(block.arguments)] : []), [['read', { path: 'a.ts' }], ['list', { dir: 'src' }]])
   assert.notEqual(ends[0]?.type === 'tool-call' && ends[0].id, ends[1]?.type === 'tool-call' && ends[1].id)
   assert.deepEqual(finishOf(chunks), { kind: 'tool-calls' })
+})
+
+test('malformed and array tool arguments never become executable empty calls; truncation remains max-tokens', async () => {
+  for (const argumentsText of ['[]', '{"path":']) {
+    for (const truncated of [false, true]) {
+      const events = [
+        { type: 'response.created', response: { id: 'bad' } },
+        { type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', id: 'fc_bad', call_id: 'bad', name: 'read', arguments: '' } },
+        { type: 'response.function_call_arguments.delta', output_index: 0, delta: argumentsText },
+        { type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', id: 'fc_bad', call_id: 'bad', name: 'read', arguments: argumentsText } },
+        { type: truncated ? 'response.incomplete' : 'response.completed', response: { id: 'bad', status: truncated ? 'incomplete' : 'completed',
+          ...truncated ? { incomplete_details: { reason: 'max_output_tokens' } } : {}, usage: { input_tokens: 2, output_tokens: 2, total_tokens: 4 } } },
+      ]
+      const http = fakeFetch(sse(events))
+      const { instance } = adapter({ fetch: http.fetch })
+      const chunks = await collect(instance.stream(request('gpt-6')))
+      const reason = finishOf(chunks)
+      assert.deepEqual(blockEnds(chunks), [], 'malformed arguments must not be completed as a {} tool call')
+      if (truncated) assert.deepEqual(reason, { kind: 'max-tokens' })
+      else assert.equal(reason.kind === 'error' && reason.failure.code, 'MALFORMED_RESPONSE')
+    }
+  }
 })
 
 test('tool results and prior tool calls are sent back on the next request as agent-initiated', async () => {
@@ -371,6 +397,52 @@ test('a prepared call keeps its own token generation and model definition across
   assert.equal(http.requests[0]?.headers.get('authorization'), 'Bearer tok-1')
   assert.deepEqual(finishOf(chunks), { kind: 'stop' })
   await assert.rejects(instance.prepareCall('copilot-bridge', 'gpt-6'), { code: 'UNKNOWN_MODEL' })
+})
+
+test('preparation rejects a model definition and token from different generations', async () => {
+  const tokens = fakeTokens(token(1))
+  const http = fakeFetch(sse(responsesText('must not send')))
+  const instance = new BridgeAdapter({
+    catalog: { ready: async () => { tokens.set(token(2, BASE, 2)); return snapshot } },
+    tokens: tokens.tokens, hidden: () => [], fetch: http.fetch,
+  })
+  await assert.rejects(instance.prepareCall('copilot-bridge', 'gpt-6'), { code: 'DISCOVERY_FAILED' })
+  assert.deepEqual(http.requests, [])
+})
+
+test('401 retry never sends a prepared conversation using a different account', async () => {
+  const tokens = fakeTokens(token(1))
+  const http = fakeFetch(() => {
+    tokens.set(token(2, 'https://api.two.githubcopilot.com', 2))
+    return httpError(401, 'expired')()
+  }, sse(responsesText('must not send')))
+  const { instance } = adapter({ tokens: tokens.tokens, fetch: http.fetch })
+  await assert.rejects(collect(instance.stream(request('mai-code-2'))), { code: 'AUTH' })
+  assert.equal(http.requests.length, 1)
+})
+
+test('exact lookup and preparation honor pre-abort and stop waiting promptly without cancelling shared discovery', async () => {
+  let release!: (value: CatalogSnapshot) => void
+  const discovery = new Promise<CatalogSnapshot>(resolve => { release = resolve })
+  let reads = 0
+  const { instance } = adapter({ catalog: { ready: () => { reads++; return discovery } } })
+  const aborted = new AbortController()
+  aborted.abort()
+  await assert.rejects(instance.resolveModel('copilot-bridge', 'gpt-6', aborted.signal), { code: 'ABORTED' })
+  await assert.rejects(instance.prepareCall('copilot-bridge', 'gpt-6', aborted.signal), { code: 'ABORTED' })
+  assert.equal(reads, 0, 'pre-aborted requests do not start discovery')
+  const caller = new AbortController()
+  const resolving = instance.resolveModel('copilot-bridge', 'gpt-6', caller.signal)
+  const preparing = instance.prepareCall('copilot-bridge', 'gpt-6', caller.signal)
+  const survivor = instance.resolveModel('copilot-bridge', 'mai-code-2')
+  const failures = Promise.all([
+    assert.rejects(resolving, { code: 'ABORTED' }), assert.rejects(preparing, { code: 'ABORTED' }),
+  ])
+  caller.abort()
+  try {
+    await Promise.race([failures, new Promise<void>((_resolve, reject) => setImmediate(() => reject(new Error('abort did not settle promptly'))))])
+  } finally { release(snapshot) }
+  assert.equal((await survivor).id, 'mai-code-2')
 })
 
 test('signed out: prepareCall fails with a missing-credential error', async () => {
