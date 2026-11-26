@@ -189,7 +189,8 @@ test('Models offers manual refresh and shows catalog loading and retryable error
   const loading = ui.renderModels({ ...display, catalog: { ...catalog, state: 'loading' } })
   assert.match(loading, /aria-busy="true"/)
   assert.match(loading, /role="status"[^>]*>Loading models/)
-  assert.match(loading, /<button[^>]*disabled=""[^>]*>Refresh<\/button>/)
+  const refreshing = ui.renderModels({ ...display, loading: true })
+  assert.match(refreshing, /<button[^>]*disabled=""[^>]*>Refresh<\/button>/)
   assert.match(loading, /Claude Haiku 4.5/)
   for (const html of [
     ui.renderModels({ ...display, catalog: { ...catalog, state: 'error', error: 'Discovery unavailable' } }),
@@ -204,6 +205,17 @@ test('Models offers manual refresh and shows catalog loading and retryable error
   const empty = ui.renderModels({ ...display, catalog: { ...catalog, models: [] } })
   assert.match(empty, /No models are available to this account/)
   assert.doesNotMatch(empty, /Loading models|github-copilot provider|configured provider catalog/)
+})
+
+test('a failed catalog read remains retryable even when the previous snapshot was still loading', () => {
+  const html = ui.renderModels({
+    catalog: { status, models: props.models, state: 'loading' },
+    loading: false, busy: false, loadError: 'Connection interrupted', onSave: props.onSave, onRefresh: () => {},
+  })
+  assert.match(html, /Connection interrupted/)
+  assert.match(html, /Claude Haiku 4.5/)
+  assert.match(html, /<button[^>]*>Retry<\/button>/)
+  assert.doesNotMatch(html, /<button[^>]*disabled=""[^>]*>(?:Refresh|Retry)<\/button>/)
 })
 
 test('both locales translate every key and render model discovery states and disabled reasons', () => {

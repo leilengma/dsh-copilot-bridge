@@ -21,14 +21,14 @@ export function ModelsDisplay({ catalog, loading, busy, loadError, saveError, on
   useLocaleRevision()
   const status = catalog?.status
   const error = loadError ?? (catalog?.state === 'error' ? catalog.error ?? text('modelCatalogError') : undefined)
-  const discovering = loading || catalog?.state === 'loading'
+  const discovering = loading || (catalog?.state === 'loading' && loadError === undefined)
   return (
     <section style={modelCss.page} aria-label={text('hiddenModelsTitle')} aria-busy={discovering}>
       <div style={css.actions}>
-        <Button type="button" variant="outline" disabled={busy || discovering} onClick={onRefresh}>{text('refreshModels')}</Button>
+        <Button type="button" variant="outline" disabled={busy || loading} onClick={onRefresh}>{text('refreshModels')}</Button>
       </div>
       {error === undefined ? null : <div role="alert" style={css.error}>
-        {error}{' '}<Button type="button" variant="outline" disabled={busy || discovering} onClick={onRefresh}>{text('retry')}</Button>
+        {error}{' '}<Button type="button" variant="outline" disabled={busy || loading} onClick={onRefresh}>{text('retry')}</Button>
       </div>}
       {saveError === undefined ? null : <p role="alert" style={css.error}>{saveError}</p>}
       {discovering ? <p role="status" style={css.hint}>{text('loadingModels')}</p> : null}
@@ -103,7 +103,7 @@ export function CopilotModelsPage({ onStatusChange }: { readonly onStatusChange:
   }
 
   const refresh = () => {
-    if (busy || loading || catalog?.state === 'loading') return
+    if (busy || loading) return
     refreshRequested.current = true
     setRetry(value => value + 1)
   }
