@@ -6,6 +6,8 @@ import { buildSync } from 'esbuild'
 import type { CopilotPluginTabs } from '../src/client/plugin-page.tsx'
 import type { UsageDisplay } from '../src/client/account-usage.tsx'
 import type { ModelsTable } from '../src/client/hidden-models-card.tsx'
+import type { ModelsDisplay } from '../src/client/models-page.tsx'
+import type { api } from '../src/client/api.ts'
 
 type TableProps = Parameters<typeof ModelsTable>[0]
 
@@ -16,6 +18,8 @@ const compiled = buildSync({
     import { renderToStaticMarkup } from 'react-dom/server'
     import { CopilotPluginTabs } from './src/client/plugin-page.tsx'
     import { ModelsTable } from './src/client/hidden-models-card.tsx'
+    import { ModelsDisplay } from './src/client/models-page.tsx'
+    export { api } from './src/client/api.ts'
     import { UsageDisplay } from './src/client/account-usage.tsx'
     import { apply, inject } from './src/client/index.tsx'
     export const injections = inject
@@ -41,6 +45,7 @@ const compiled = buildSync({
     export const renderTabs = props => renderToStaticMarkup(createElement(CopilotPluginTabs, props))
     export const renderUsage = props => renderToStaticMarkup(createElement(UsageDisplay, props))
     export const renderTable = props => renderToStaticMarkup(createElement(ModelsTable, props))
+    export const renderModels = props => renderToStaticMarkup(createElement(ModelsDisplay, props))
     export const getRevision = authRevision.getSnapshot
     export const subscribeToRevision = authRevision.subscribe
     export const emitRemote = (event, key) => remoteListeners.get(event)?.(key)
@@ -67,6 +72,8 @@ const ui = bundled.exports as {
   emitRemote: (event: string, key: string) => void
   renderTabs: (props: Parameters<typeof CopilotPluginTabs>[0]) => string
   renderTable: (props: TableProps) => string
+  renderModels: (props: Parameters<typeof ModelsDisplay>[0]) => string
+  api: typeof api
   renderUsage: (props: Parameters<typeof UsageDisplay>[0]) => string
 }
 
@@ -151,6 +158,51 @@ test('Account owns sign-in and host controls; Models is absent until authenticat
   assert.doesNotMatch(models, /aria-label="Account usage"/)
 })
 
+test('Models offers manual refresh and shows catalog loading and retryable errors without dropping the last good rows', () => {
+  const catalog = { status, models: [...props.models, { id: 'disabled', name: 'Disabled model', disabledReason: 'not-offered' as const }], state: 'ready' as const }
+  const display = { catalog, loading: false, busy: false, onSave: props.onSave, onRefresh: () => {} }
+  const ready = ui.renderModels(display)
+  assert.match(ready, /<button[^>]*>Refresh<\/button>/)
+  assert.match(ready, /Claude Haiku 4.5/)
+  assert.match(ready, /Disabled model/)
+  assert.match(ready, /Not offered for selection/)
+  const loading = ui.renderModels({ ...display, catalog: { ...catalog, state: 'loading' } })
+  assert.match(loading, /aria-busy="true"/)
+  assert.match(loading, /role="status"[^>]*>Loading models/)
+  assert.match(loading, /<button[^>]*disabled=""[^>]*>Refresh<\/button>/)
+  assert.match(loading, /Claude Haiku 4.5/)
+  for (const html of [
+    ui.renderModels({ ...display, catalog: { ...catalog, state: 'error', error: 'Discovery unavailable' } }),
+    ui.renderModels({ ...display, loadError: 'Discovery unavailable' }),
+  ]) {
+    assert.match(html, /role="alert"/)
+    assert.match(html, /Discovery unavailable/)
+    assert.match(html, /<button[^>]*>Retry<\/button>/)
+    assert.match(html, /Claude Haiku 4.5/)
+    assert.match(html, /Disabled model/)
+  }
+  const empty = ui.renderModels({ ...display, catalog: { ...catalog, models: [] } })
+  assert.match(empty, /No models are available to this account/)
+  assert.doesNotMatch(empty, /Loading models|github-copilot provider|configured provider catalog/)
+})
+
+test('manual catalog refresh posts to the authenticated route and a failed refresh can be retried', async t => {
+  const catalog = { status, models: props.models, state: 'ready' }
+  const calls: { url: string; method: string | undefined; cache: RequestCache | undefined }[] = []
+  let fail = true
+  t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+    calls.push({ url, method: init.method, cache: init.cache })
+    return Response.json(fail ? { ok: false, error: 'Discovery unavailable' } : { ok: true, value: catalog }, { status: fail ? 503 : 200 })
+  })
+  await assert.rejects(ui.api.refreshModels(), /Discovery unavailable/)
+  fail = false
+  assert.deepEqual(await ui.api.refreshModels(), catalog)
+  assert.deepEqual(calls, [
+    { url: '/api/copilot-bridge/models/refresh', method: 'POST', cache: 'no-store' },
+    { url: '/api/copilot-bridge/models/refresh', method: 'POST', cache: 'no-store' },
+  ])
+})
+
 test('model table exposes accessible eye toggles, search and real metadata without invented costs', () => {
   const html = ui.renderTable(props)
   assert.match(html, /type="search"/)
@@ -220,6 +272,15 @@ test('bridge record updates notify model-page subscribers but other records do n
     assert.equal(ui.getRevision(), before + 1)
     assert.equal(notifications, 1)
   } finally { unsubscribe() }
+})
+
+test('bridge catalog updates refresh Models subscribers when background discovery completes', () => {
+  const before = ui.getRevision()
+  ui.emitRemote('llm/models-updated', 'github-copilot')
+  ui.emitRemote('llm/models-updated', 'another-provider')
+  assert.equal(ui.getRevision(), before)
+  ui.emitRemote('llm/models-updated', 'copilot-bridge')
+  assert.equal(ui.getRevision(), before + 1)
 })
 
 test('credential reference changes still refresh Account subscribers without chat integration', () => {

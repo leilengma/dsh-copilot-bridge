@@ -63,7 +63,7 @@ export interface SlotRegistry {
 
 /** `@deepseek-ai/dsh-api-remotes`: Host events forwarded to the browser. */
 export interface ClientRemote {
-  $on(event: 'credentials/reference-updated' | 'credentials/record-updated', listener: (ref: string) => void): Dispose
+  $on(event: 'credentials/reference-updated' | 'credentials/record-updated' | 'llm/models-updated', listener: (ref: string) => void): Dispose
 }
 
 /** The client plugin context, restricted to the services listed in `inject`. */
