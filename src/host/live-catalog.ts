@@ -3,6 +3,7 @@
  * validation and projection into protocol-bound catalog entries (spec D8,
  * D9, D11, D12, D13). The raw payload is never kept, logged or exposed.
  */
+import { githubFetch } from './transport.ts'
 
 export type CatalogProtocol = 'anthropic-messages' | 'openai-responses' | 'openai-completions'
 export type DisabledReason = 'unsupported-protocol' | 'not-offered'
@@ -76,4 +77,166 @@ export function projectCatalog(payload: unknown): readonly CatalogModel[] {
   const data = object(payload)?.data
   if (!Array.isArray(data)) throw new Error('Copilot model catalog response is invalid')
   return data.flatMap(value => projectModel(value) ?? [])
+}
+
+/** Subset of the host-memory Copilot access token needed for discovery. */
+export interface CatalogToken {
+  readonly token: string
+  readonly baseUrl: string
+  readonly generation: number
+}
+
+export interface CatalogSnapshot {
+  readonly generation: number
+  readonly models: readonly CatalogModel[]
+}
+
+export type CatalogState =
+  | { readonly status: 'loading' }
+  | { readonly status: 'ready' }
+  | { readonly status: 'error'; readonly error: string }
+
+export interface LiveCatalogDeps {
+  readonly token: () => Promise<CatalogToken>
+  readonly fetch?: (url: string, init?: RequestInit) => Promise<Response>
+  readonly logger: { warn(message: string): void }
+  readonly timeoutMs?: number
+}
+
+export interface LiveCatalog {
+  /** Start (or join) a discovery and resolve with its snapshot. */
+  refresh(): Promise<CatalogSnapshot>
+  /** Await in-flight discovery; trigger one while unknown; else the current snapshot. */
+  ready(): Promise<CatalogSnapshot>
+  /** Last good snapshot, or `undefined` while unknown. */
+  snapshot(): CatalogSnapshot | undefined
+  state(): CatalogState
+  /** Sign-out / host switch: drop the snapshot and abort + discard in-flight discovery. */
+  reset(): void
+  onChange(listener: () => void): () => void
+  dispose(): void
+}
+
+const COPILOT_HEADERS = {
+  Accept: 'application/json',
+  'User-Agent': 'GitHubCopilotChat/0.35.0',
+  'Editor-Version': 'vscode/1.107.0',
+  'Editor-Plugin-Version': 'copilot-chat/0.35.0',
+  'Copilot-Integration-Id': 'vscode-chat',
+  'X-GitHub-Api-Version': '2026-06-01',
+} as const
+
+const cancelled = () => new Error('Copilot model discovery was cancelled')
+
+function modelsUrl(baseUrl: string): string {
+  let url: URL
+  try {
+    url = new URL(`${baseUrl.replace(/\/+$/, '')}/models`)
+  } catch {
+    throw new Error('Copilot API base URL is invalid')
+  }
+  if (url.protocol !== 'https:') throw new Error('Copilot API base URL must use HTTPS')
+  return url.href
+}
+
+/** Single-flight, generation-tagged live catalog; no static fallback ever. */
+export function createLiveCatalog(deps: LiveCatalogDeps): LiveCatalog {
+  const fetch = deps.fetch ?? githubFetch
+  const timeoutMs = deps.timeoutMs ?? 15_000
+  const listeners = new Set<() => void>()
+  let current: CatalogSnapshot | undefined
+  let status: CatalogState = { status: 'loading' }
+  let inFlight: { readonly promise: Promise<CatalogSnapshot>; readonly abort: AbortController } | undefined
+  let epoch = 0
+  let disposed = false
+
+  const emit = () => {
+    for (const listener of [...listeners]) {
+      try {
+        listener()
+      } catch (error) {
+        deps.logger.warn(`Catalog listener failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }
+
+  async function discover(abort: AbortController, started: number): Promise<CatalogSnapshot> {
+    const live = () => { if (started !== epoch) throw cancelled() }
+    try {
+      const access = await deps.token()
+      live()
+      const url = modelsUrl(access.baseUrl)
+      const response = await fetch(url, {
+        headers: { ...COPILOT_HEADERS, Authorization: `Bearer ${access.token}` },
+        redirect: 'error', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(timeoutMs)]),
+      })
+      live()
+      if (!response.ok) throw new Error(`Copilot model discovery failed (HTTP ${response.status})`)
+      const payload: unknown = await response.json().catch(() => undefined)
+      live()
+      const snapshot: CatalogSnapshot = { generation: access.generation, models: projectCatalog(payload) }
+      current = snapshot
+      status = { status: 'ready' }
+      emit()
+      return snapshot
+    } catch (error) {
+      if (started !== epoch) throw cancelled()
+      // Only messages produced above cross the boundary; foreign errors may carry secrets.
+      const message = error instanceof Error && error.message.startsWith('Copilot ') ? error.message : 'Copilot model discovery failed'
+      deps.logger.warn(message)
+      status = { status: 'error', error: message }
+      emit()
+      throw new Error(message)
+    } finally {
+      if (inFlight?.abort === abort) inFlight = undefined
+    }
+  }
+
+  function refresh(): Promise<CatalogSnapshot> {
+    if (disposed) return Promise.reject(new Error('Copilot model catalog is disposed'))
+    if (inFlight) return inFlight.promise
+    const abort = new AbortController()
+    const previous = status
+    status = { status: 'loading' }
+    const promise = discover(abort, epoch)
+    inFlight = { promise, abort }
+    if (previous.status !== 'loading') emit()
+    return promise
+  }
+
+  function reset(): void {
+    epoch++
+    inFlight?.abort.abort(cancelled())
+    inFlight = undefined
+    const changed = current !== undefined || status.status !== 'loading'
+    current = undefined
+    status = { status: 'loading' }
+    if (changed) emit()
+  }
+
+  return {
+    refresh,
+    async ready() {
+      if (!inFlight && current) return current
+      try {
+        return await refresh()
+      } catch (error) {
+        // A failed refresh is non-destructive: the last good snapshot stays usable.
+        if (current) return current
+        throw error
+      }
+    },
+    snapshot: () => current,
+    state: () => status,
+    reset,
+    onChange(listener) {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    dispose() {
+      listeners.clear()
+      reset()
+      disposed = true
+    },
+  }
 }
