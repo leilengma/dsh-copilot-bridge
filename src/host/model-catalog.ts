@@ -24,5 +24,5 @@ export async function modelCatalog(
     }
     return { ...live?.get(id), id, name: id }
   }))
-  return { status, models }
+  return { status, models, state: 'ready' }
 }
