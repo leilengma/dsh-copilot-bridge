@@ -11,6 +11,25 @@ const chat = (id: string, endpoints: readonly string[] | undefined, extra: Recor
   ...extra,
 })
 
+/** Adaptive-only live descriptor shape; synthetic metadata, not an account response. */
+export const opus55Payload = {
+  data: [chat('claude-opus-5.5', ['/v1/messages', '/chat/completions'], {}, {
+    vision: true, reasoning_effort: ['low', 'medium', 'high', 'xhigh', 'max'],
+  })],
+}
+
+/** Exact adaptive IDs verified in pi-ai 1.3.0's Copilot metadata, plus a genuine budget model. */
+export const anthropicThinkingPayload = {
+  data: [
+    ...['claude-fable-5', 'claude-fable-5.1', 'claude-haiku-5.5', 'claude-opus-4.7', 'claude-opus-4.8',
+      'claude-opus-5', 'claude-sonnet-5', 'claude-sonnet-5.5'].map(id =>
+      chat(id, ['/v1/messages', '/chat/completions'], {}, { reasoning_effort: ['low', 'medium', 'high', 'xhigh', 'max'] })),
+    chat('claude-sonnet-4.6', ['/v1/messages'], {}, { reasoning_effort: ['low', 'medium', 'high', 'max'] }),
+    chat('claude-haiku-4.5', ['/v1/messages'], {}, { reasoning_effort: ['low', 'medium', 'high'] }),
+    ...opus55Payload.data,
+  ],
+}
+
 export const modelsPayload = {
   object: 'list',
   data: [

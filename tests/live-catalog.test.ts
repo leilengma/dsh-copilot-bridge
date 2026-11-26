@@ -178,6 +178,18 @@ test('a failure with no snapshot leaves the catalog unknown and ready rejects wi
   assert.equal(catalog.state().status, 'error')
 })
 
+test('foreign Copilot-prefixed errors and listener errors never leak credentials to state or logs', async () => {
+  const { catalog, logs } = harness({ respond: async () => { throw new Error(`Copilot ${SECRET}`) } })
+  await assert.rejects(catalog.refresh(), error => error instanceof Error && !error.message.includes(SECRET))
+  assert.equal(JSON.stringify(catalog.state()).includes(SECRET), false)
+  assert.equal(logs.join('\n').includes(SECRET), false)
+
+  const successful = harness()
+  successful.catalog.onChange(() => { throw new Error(`Copilot ${SECRET}`) })
+  await successful.catalog.refresh()
+  assert.equal(successful.logs.join('\n').includes(SECRET), false)
+})
+
 test('an invalid payload is an error, not an empty catalog', async () => {
   const { catalog } = harness({ respond: async () => Response.json({ models: [] }) })
   await assert.rejects(catalog.refresh(), /invalid/)

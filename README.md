@@ -42,6 +42,16 @@ Missing metadata is shown as **—**, never guessed or treated as zero. Metadata
 
 Signing out deletes only the bridge credential, drops its in-memory access tokens and catalog, and unsets `hiddenModels` and `pinnedModels`. The bridge picker empties immediately; Enterprise host configuration is retained. The native `github-copilot` provider and other providers are unaffected. To switch GitHub hosts, sign out, save the new **GitHub host**, then sign in again.
 
+### Thinking compatibility
+
+Reasoning choices come only from the live model's advertised `reasoning_effort` values that pi-ai understands; an unsupported choice is rejected before inference HTTP. Endpoint selection still comes only from `supported_endpoints`, never the model name.
+
+For Messages, the bridge copies **only** `forceAdaptiveThinking` for the exact Copilot IDs verified in pinned pi-ai 1.3.0's `dist/providers/data/github-copilot.json`: `claude-fable-5`, `claude-fable-5.1`, `claude-haiku-5.5`, `claude-opus-4.7`, `claude-opus-4.8`, `claude-opus-5`, `claude-opus-5.5`, `claude-sonnet-4.6`, `claude-sonnet-5`, and `claude-sonnet-5.5`. Explicit advertised efforts use adaptive thinking plus `output_config.effort`, not legacy token budgets. This is a narrow compatibility list, **not** a static catalog fallback or a rule for all Anthropic models. Genuine older models such as Haiku 4.5 retain pi-ai's budget handling.
+
+Opus 5.5, Sonnet 5.5, Fable 5 and Fable 5.1 cannot accept disabled thinking. With no effort selected, their requests explicitly enable adaptive thinking through pi-ai's public `stream` export, **omitting effort** so the server chooses its default (currently medium on Opus 5.5). This also works if no effort choices are advertised: no choice is invented or exposed. Other models retain their supported no-effort/off behavior. Merely setting `forceAdaptiveThinking` on `streamSimple` would not fix the no-effort path: pi-ai 1.3.0 still selects disabled. The bridge does not claim mid-conversation effort, system-message, tool-change or thinking-binding capabilities as a workaround.
+
+Policy sources: Anthropic's [thinking configuration table](https://platform.claude.com/docs/en/build-with-claude/thinking#configuring-thinking), [thinking support and rejected configurations](https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting#thinking-support-defaults-and-rejected-configurations-by-model), and [effort defaults](https://platform.claude.com/docs/en/build-with-claude/effort#how-effort-works); pinned pi-ai `dist/api/anthropic-messages.js` (`streamSimple`, `buildParams`) and `dist/api/anthropic-messages.d.ts` (`thinkingEnabled`, `effort`). The reported Opus 5.5 HTTP 400 matches the documented rejection of `thinking.type.disabled`. Recheck these exact-ID policies when deliberately upgrading pi-ai; new IDs are not inferred. Deterministic fake-HTTP tests verify wire requests, not live inference.
+
 ### Account usage
 
 While signed in, **Account** shows usage directly beneath **Signed in at …**: percentage used, progress and the provider's reset time. Hover or keyboard-focus the percentage for exact used / total credits (or requests on request-based plans). Unlimited and unavailable quotas are labelled rather than displayed as zero.
@@ -99,6 +109,8 @@ ELECTRON_RUN_AS_NODE=1 '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSe
   scripts/test-installed-picker.cjs \
   '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules'
 ```
+
+Device-flow cancellation is checked inside the credential store's exclusive mutation callback and after write/readback and preference-reset awaits. A cancelled flow cannot enter a queued credential mutation or start further preference resets. The credential API has no commit-time cancellation: once the callback has admitted a write, cancellation during its disk persistence cannot revoke it. Serialized logout deletion follows that write; unload/host changes alone cannot promise rollback. Preference writes already handed to settings likewise cannot be revoked. The bridge never deletes or restores a record to compensate, which could overwrite a replacement account.
 
 Installed checks use in-memory fixtures, not desktop credentials or profiles. Deterministic tests and installed-runtime checks do not replace browser acceptance or authorize live inference; any live smoke test requires separate approval.
 

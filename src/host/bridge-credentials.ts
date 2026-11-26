@@ -41,16 +41,27 @@ export async function readBridgeAccount(store: Pick<CredentialProvider, 'readRec
   return bridgeAccount(await store?.readRecord(bridgeRecordKey()))
 }
 
-/** Replace the record, then read it back so a store that drops the write fails sign-in. */
-export async function writeBridgeAccount(store: CredentialStore, account: BridgeAccount): Promise<void> {
+/**
+ * Guard admission inside the store's exclusive mutation callback, then verify the write.
+ * The credential API cannot revoke persistence after the callback returns; never roll back
+ * a cancelled write here, as that could delete a replacement account.
+ */
+export async function writeBridgeAccount(store: CredentialStore, account: BridgeAccount, signal?: AbortSignal): Promise<void> {
+  const checkActive = () => { if (signal?.aborted) throw new Error('GitHub sign-in was cancelled') }
+  checkActive()
   const payload: BridgeGrantPayload = {
     type: 'github-oauth',
     token: account.token,
     ...(account.enterpriseHost === undefined ? {} : { enterpriseHost: account.enterpriseHost }),
   }
   const record: GrantRecord = { kind: 'grant', payload }
-  await store.modifyRecord(bridgeRecordKey(), async () => record)
+  await store.modifyRecord(bridgeRecordKey(), async () => {
+    checkActive()
+    return record
+  })
+  checkActive()
   const written = await readBridgeAccount(store)
+  checkActive()
   if (written?.token !== account.token || written.enterpriseHost !== account.enterpriseHost) {
     throw new Error(`the credential record at ${BRIDGE_RECORD_KEY} did not survive the write`)
   }

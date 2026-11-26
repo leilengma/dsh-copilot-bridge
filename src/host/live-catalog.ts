@@ -6,6 +6,7 @@
 import { attributionHeaders } from '@deepseek-ai/dsh-llm'
 import type { ModelProtocol, ModelDisabledReason, CatalogState as ModelCatalogState } from '../shared/contract.ts'
 import { githubFetch } from './transport.ts'
+import { COPILOT_EDITOR_HEADERS, COPILOT_USER_AGENT } from './copilot-headers.ts'
 
 export type CatalogProtocol = ModelProtocol
 export type DisabledReason = ModelDisabledReason
@@ -74,10 +75,13 @@ function projectModel(value: unknown): CatalogModel | undefined {
   return { ...base, supported: true, protocol }
 }
 
+/** Only locally constructed catalog diagnostics are safe to publish. */
+class CatalogError extends Error {}
+
 /** Validate a `/models` response and project it; malformed descriptors are skipped. */
 export function projectCatalog(payload: unknown): readonly CatalogModel[] {
   const data = object(payload)?.data
-  if (!Array.isArray(data)) throw new Error('Copilot model catalog response is invalid')
+  if (!Array.isArray(data)) throw new CatalogError('Copilot model catalog response is invalid')
   return data.flatMap(value => projectModel(value) ?? [])
 }
 
@@ -120,23 +124,21 @@ export interface LiveCatalog {
 
 const COPILOT_HEADERS = {
   Accept: 'application/json',
-  'user-agent': 'GitHubCopilotChat/0.35.0',
-  'Editor-Version': 'vscode/1.107.0',
-  'Editor-Plugin-Version': 'copilot-chat/0.35.0',
-  'Copilot-Integration-Id': 'vscode-chat',
+  'user-agent': COPILOT_USER_AGENT,
+  ...COPILOT_EDITOR_HEADERS,
   'X-GitHub-Api-Version': '2026-06-01',
 } as const
 
-const cancelled = () => new Error('Copilot model discovery was cancelled')
+const cancelled = () => new CatalogError('Copilot model discovery was cancelled')
 
 function modelsUrl(baseUrl: string): string {
   let url: URL
   try {
     url = new URL(`${baseUrl.replace(/\/+$/, '')}/models`)
   } catch {
-    throw new Error('Copilot API base URL is invalid')
+    throw new CatalogError('Copilot API base URL is invalid')
   }
-  if (url.protocol !== 'https:') throw new Error('Copilot API base URL must use HTTPS')
+  if (url.protocol !== 'https:') throw new CatalogError('Copilot API base URL must use HTTPS')
   return url.href
 }
 
@@ -155,8 +157,8 @@ export function createLiveCatalog(deps: LiveCatalogDeps): LiveCatalog {
     for (const listener of [...listeners]) {
       try {
         listener()
-      } catch (error) {
-        deps.logger.warn(`Catalog listener failed: ${error instanceof Error ? error.message : String(error)}`)
+      } catch {
+        deps.logger.warn('Copilot catalog listener failed')
       }
     }
   }
@@ -173,7 +175,7 @@ export function createLiveCatalog(deps: LiveCatalogDeps): LiveCatalog {
           redirect: 'error', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(timeoutMs)]),
         })
         live()
-        if (!response.ok) throw new Error(`Copilot model discovery failed (HTTP ${response.status})`)
+        if (!response.ok) throw new CatalogError(`Copilot model discovery failed (HTTP ${response.status})`)
         const payload: unknown = await response.json().catch(() => undefined)
         live()
         const models = projectCatalog(payload)
@@ -189,8 +191,8 @@ export function createLiveCatalog(deps: LiveCatalogDeps): LiveCatalog {
       }
     } catch (error) {
       if (started !== epoch) throw cancelled()
-      // Only messages produced above cross the boundary; foreign errors may carry secrets.
-      const message = error instanceof Error && error.message.startsWith('Copilot ') ? error.message : 'Copilot model discovery failed'
+      // A matching prefix does not make a foreign error safe: transports may echo credentials.
+      const message = error instanceof CatalogError ? error.message : 'Copilot model discovery failed'
       deps.logger.warn(message)
       status = { status: 'error', error: message }
       emit()

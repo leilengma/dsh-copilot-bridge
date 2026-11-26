@@ -9,6 +9,7 @@
  */
 import { attributionHeaders } from '@deepseek-ai/dsh-llm'
 import { githubFetch } from './transport.ts'
+import { COPILOT_EDITOR_HEADERS, COPILOT_USER_AGENT } from './copilot-headers.ts'
 
 /** The stored GitHub account: OAuth token plus optional Enterprise host. */
 export interface CopilotAccount {
@@ -71,10 +72,8 @@ export interface AccessTokens {
 
 const COPILOT_HEADERS = {
   Accept: 'application/json',
-  'user-agent': 'GitHubCopilotChat/0.35.0',
-  'Editor-Version': 'vscode/1.107.0',
-  'Editor-Plugin-Version': 'copilot-chat/0.35.0',
-  'Copilot-Integration-Id': 'vscode-chat',
+  'user-agent': COPILOT_USER_AGENT,
+  ...COPILOT_EDITOR_HEADERS,
 }
 const DEFAULT_REFRESH_MS = 30 * 60_000
 const EXPIRY_MARGIN_MS = 60_000

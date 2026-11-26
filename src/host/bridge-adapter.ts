@@ -18,17 +18,18 @@ import type {
   AssistantMessage as PiAssistantMessage, AssistantMessageEvent, ImageContent, Message as PiMessage, Model, SimpleStreamOptions,
   TextContent, ThinkingLevel, Tool, ToolCall, TranscriptContext, Usage,
 } from '@earendil-works/pi-ai'
-import { streamSimple as anthropicMessages } from '@earendil-works/pi-ai/api/anthropic-messages'
+import { type AnthropicEffort, stream as anthropicMessages, streamSimple as anthropicMessagesSimple } from '@earendil-works/pi-ai/api/anthropic-messages'
 import { streamSimple as openaiCompletions } from '@earendil-works/pi-ai/api/openai-completions'
 import { streamSimple as openaiResponses } from '@earendil-works/pi-ai/api/openai-responses'
 import { AccessTokenError, type AccessToken, type AccessTokens } from './access-token.ts'
 import type { CatalogProtocol, LiveCatalog, SupportedCatalogModel } from './live-catalog.ts'
 import { pinnedFirst } from './pinned-models.ts'
+import { COPILOT_EDITOR_HEADERS, COPILOT_USER_AGENT } from './copilot-headers.ts'
 
 export const BRIDGE_PROVIDER = 'copilot-bridge'
 export const BRIDGE_PROVIDER_NAME = 'GitHub Copilot Bridge'
 
-/** One pi-ai `streamSimple` function per protocol. */
+/** One public pi-ai transport per protocol, accepting the shared simple options. */
 export type BridgeTransport = (
   model: Model<CatalogProtocol>, context: TranscriptContext, options: SimpleStreamOptions,
 ) => AsyncIterable<AssistantMessageEvent>
@@ -50,23 +51,44 @@ export interface BridgeAdapterDeps {
 }
 
 const DEFAULT_TRANSPORTS: Record<CatalogProtocol, BridgeTransport> = {
-  'anthropic-messages': anthropicMessages as BridgeTransport,
+  'anthropic-messages': (model, context, options) => {
+    const anthropicModel = model as Model<'anthropic-messages'>
+    // streamSimple unconditionally sends disabled when reasoning is absent.
+    // Always-on models need stream's explicit adaptive switch, without an invented effort.
+    return options.reasoning === undefined && ANTHROPIC_THINKING_POLICY[model.id] === 'always-adaptive'
+      ? anthropicMessages(anthropicModel, context, { ...options, thinkingEnabled: true })
+      : anthropicMessagesSimple(anthropicModel, context, options)
+  },
   'openai-responses': openaiResponses as BridgeTransport,
   'openai-completions': openaiCompletions as BridgeTransport,
 }
 
 /** Static editor headers Copilot expects; pi-ai adds the dynamic ones (D7). */
 const COPILOT_HEADERS = {
-  'User-Agent': 'GitHubCopilotChat/0.35.0',
-  'Editor-Version': 'vscode/1.107.0',
-  'Editor-Plugin-Version': 'copilot-chat/0.35.0',
-  'Copilot-Integration-Id': 'vscode-chat',
+  'User-Agent': COPILOT_USER_AGENT,
+  ...COPILOT_EDITOR_HEADERS,
 }
 /** pi-ai thinking levels in ascending order; advertised efforts outside this set are dropped (D12). */
 const THINKING_LEVELS: readonly ThinkingLevel[] = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+/** Public adaptive effort values: `minimal` is budget-only, not an Anthropic effort. */
+const ANTHROPIC_ADAPTIVE_EFFORTS: readonly AnthropicEffort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 /** Request ceiling when Copilot does not advertise `max_output_tokens`. */
 const FALLBACK_MAX_TOKENS = 16_384
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+
+/** Exact Copilot IDs, not protocol inference. Sources and default policy: README §Thinking compatibility. */
+const ANTHROPIC_THINKING_POLICY: Readonly<Record<string, 'adaptive' | 'always-adaptive'>> = {
+  'claude-fable-5': 'always-adaptive',
+  'claude-fable-5.1': 'always-adaptive',
+  'claude-haiku-5.5': 'adaptive',
+  'claude-opus-4.7': 'adaptive',
+  'claude-opus-4.8': 'adaptive',
+  'claude-opus-5': 'adaptive',
+  'claude-opus-5.5': 'always-adaptive',
+  'claude-sonnet-4.6': 'adaptive',
+  'claude-sonnet-5': 'adaptive',
+  'claude-sonnet-5.5': 'always-adaptive',
+}
 
 interface BoundCall {
   readonly model: SupportedCatalogModel
@@ -91,9 +113,11 @@ function waitFor<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   })
 }
 
-/** Advertised efforts that pi-ai understands, in pi-ai order (never invented). */
-export function supportedEfforts(model: Pick<SupportedCatalogModel, 'reasoningEfforts'>): readonly ThinkingLevel[] {
-  return THINKING_LEVELS.filter(level => model.reasoningEfforts.includes(level))
+/** Advertised efforts supported by this transport's thinking policy, in pi-ai order (never invented). */
+export function supportedEfforts(model: Pick<SupportedCatalogModel, 'id' | 'protocol' | 'reasoningEfforts'>): readonly ThinkingLevel[] {
+  const levels = model.protocol === 'anthropic-messages' && Object.hasOwn(ANTHROPIC_THINKING_POLICY, model.id)
+    ? ANTHROPIC_ADAPTIVE_EFFORTS : THINKING_LEVELS
+  return levels.filter(level => model.reasoningEfforts.includes(level))
 }
 
 function modelInfo(model: SupportedCatalogModel, vision: boolean): LlmModelInfo {
@@ -113,6 +137,8 @@ function resolvedInfo(model: SupportedCatalogModel, vision: boolean): LlmResolve
 
 function piModel(model: SupportedCatalogModel, baseUrl: string): Model<CatalogProtocol> {
   const efforts = supportedEfforts(model)
+  const thinking = model.protocol === 'anthropic-messages' && Object.hasOwn(ANTHROPIC_THINKING_POLICY, model.id)
+    ? ANTHROPIC_THINKING_POLICY[model.id] : undefined
   return {
     id: model.id,
     name: model.name,
@@ -122,7 +148,8 @@ function piModel(model: SupportedCatalogModel, baseUrl: string): Model<CatalogPr
     input: [...model.input],
     cost: ZERO_COST,
     headers: { ...COPILOT_HEADERS },
-    reasoning: efforts.length > 0,
+    reasoning: efforts.length > 0 || thinking === 'always-adaptive',
+    ...thinking === undefined ? {} : { compat: { forceAdaptiveThinking: true } },
     // Unadvertised levels map to `null` so pi-ai never clamps onto an invented level.
     thinkingLevelMap: Object.fromEntries(THINKING_LEVELS.map(level => [level, efforts.includes(level) ? level : null])),
     contextWindow: model.contextWindow ?? 0,
@@ -151,12 +178,23 @@ function mapUsage(usage: Usage): TokenUsage {
   }
 }
 
-/** Classify a pi-ai terminal error; the HTTP status (when observed) wins over message text. */
+/** Only owned diagnostics cross the boundary; raw provider text is classification evidence, never output. */
 function failureOf(message: string, status: number | undefined, aborted: boolean): LlmFailure {
   const code = aborted ? 'ABORTED' : classify(message, status)
   const leading = /^\D{0,40}?\b([45]\d\d)\b/.exec(message)
   const httpStatus = status !== undefined && status >= 400 ? status : leading ? Number(leading[1]) : undefined
-  return { message: message || 'Copilot request failed', code, ...httpStatus === undefined ? {} : { status: httpStatus } }
+  const diagnostics: Readonly<Record<string, string>> = {
+    ABORTED: 'Copilot request aborted',
+    AUTH: 'Copilot authentication failed; sign in again',
+    CONTEXT_WINDOW_EXCEEDED: 'Copilot model context window exceeded',
+    QUOTA: 'Copilot quota exceeded',
+    RATE_LIMIT: 'Copilot rate limit exceeded; retry later',
+    INVALID_REQUEST: 'Copilot rejected the request',
+    SERVER: 'Copilot service failed; retry later',
+    TIMEOUT: 'Copilot request timed out',
+    TRANSPORT: 'Copilot connection failed',
+  }
+  return { message: diagnostics[code] ?? 'Copilot request failed', code, ...httpStatus === undefined ? {} : { status: httpStatus } }
 }
 
 function classify(message: string, status: number | undefined): string {
@@ -455,8 +493,8 @@ export class BridgeAdapter extends LlmAdapter {
           if (event.type === 'done' || event.type === 'error') return
         }
       } catch (error) {
-        if (options.signal?.aborted) throw new LlmError('Copilot request aborted by caller', 'ABORTED', { cause: error })
-        throw error
+        const failure = failureOf(error instanceof Error ? error.message : '', status, options.signal?.aborted === true)
+        throw LlmError.fromFailure(failure)
       } finally {
         consumer.abort()
       }
