@@ -19,10 +19,10 @@ Restart the app.
 
 ## Use
 
-1. Open **Plugins → GitHub Copilot → Account**.
-2. Under **GitHub host**, enter your Enterprise URL (for example `https://octocorp.ghe.com/`) and click **Save**. The input shows the saved value as its placeholder. **Use github.com** clears it.
-3. Click **Sign in to GitHub Copilot**, open the device page (`https://<host>/login/device`) and enter the code shown.
-4. In **Settings → Models**, add or select the `github-copilot` provider. Leave its API key blank. The card shows a notice that no API key is needed and that you only need to click **Apply**. If you are not signed in yet, the notice tells you to sign in first.
+1. In the Harness sidebar, click **Plugins**, open **GitHub Copilot**, and select the **Account** tab. Sign-in is on this plugin page, not in Harness Settings.
+2. If you use GitHub Enterprise, enter your Enterprise URL (for example `https://octocorp.ghe.com/`) under **GitHub host** and click **Save**. For a personal GitHub account, leave the default **github.com** host; **Use github.com** clears a previously saved Enterprise host. This section is shown only while signed out.
+3. On the **Account** tab, click **Sign in to GitHub Copilot**, open the device page (`https://<host>/login/device`), and enter the code shown. After sign-in, this tab shows your account usage and the **Models** tab becomes available.
+4. Separately, configure the built-in provider in Harness **Settings → Models**: add or select `github-copilot`, leave its API key blank, and click **Apply**. This Settings page configures the provider; it is not the GitHub Copilot sign-in page.
 5. After the provider's first request populates its model list, open **Plugins → GitHub Copilot → Models**. The **Models** tab appears only after sign-in; sign-out hides it and returns you to **Account**. The leftmost **eye** button controls whether a model appears in model selection: an open eye means visible; a crossed-out eye means hidden. Click again to restore it. Changes save immediately. Search matches model names and ids without changing the saved selection; counts always describe the whole account, with a shown count while searching.
 
 The Plugins table includes context size and input capabilities from Harness metadata, even for hidden models. It also reads Copilot's live catalog for **input/output/cache-read/cache-write credit prices per 1M tokens**, **discount badges** and **Retiring warnings** (hover for the provider's message). Long-context prices, when supplied, expand below the default prices. Prices use the provider's reported amounts without applying a promotional discount again. Expired promotions are omitted. These are informational only: eligibility and your eye-toggle settings are unchanged; retiring models are not automatically hidden.
@@ -31,9 +31,7 @@ Missing metadata is shown as **—**, never guessed or treated as zero. Live met
 
 The `/copilot-login`, `/copilot-status` and `/copilot-logout` commands work on chat surfaces too. Status includes the hidden count when nonzero.
 
-If you change the host while signed in, the page tells you that the stored credential belongs to the other host. Sign out and sign in again to switch.
-
-The **GitHub host** section is shown only while signed out; sign out first to choose a different host. The Account tab omits the duplicate GitHub Copilot heading.
+To switch GitHub hosts, open **Plugins → GitHub Copilot → Account**, sign out, choose and save the new **GitHub host**, then sign in again. The host section is hidden while signed in.
 
 ### Account usage
 
