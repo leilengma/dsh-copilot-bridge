@@ -18,7 +18,7 @@ import type {
   AssistantMessage as PiAssistantMessage, AssistantMessageEvent, ImageContent, Message as PiMessage, Model, SimpleStreamOptions,
   TextContent, ThinkingLevel, Tool, ToolCall, TranscriptContext, Usage,
 } from '@earendil-works/pi-ai'
-import { stream as anthropicMessages, streamSimple as anthropicMessagesSimple } from '@earendil-works/pi-ai/api/anthropic-messages'
+import { type AnthropicEffort, stream as anthropicMessages, streamSimple as anthropicMessagesSimple } from '@earendil-works/pi-ai/api/anthropic-messages'
 import { streamSimple as openaiCompletions } from '@earendil-works/pi-ai/api/openai-completions'
 import { streamSimple as openaiResponses } from '@earendil-works/pi-ai/api/openai-responses'
 import { AccessTokenError, type AccessToken, type AccessTokens } from './access-token.ts'
@@ -70,6 +70,8 @@ const COPILOT_HEADERS = {
 }
 /** pi-ai thinking levels in ascending order; advertised efforts outside this set are dropped (D12). */
 const THINKING_LEVELS: readonly ThinkingLevel[] = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+/** Public adaptive effort values: `minimal` is budget-only, not an Anthropic effort. */
+const ANTHROPIC_ADAPTIVE_EFFORTS: readonly AnthropicEffort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 /** Request ceiling when Copilot does not advertise `max_output_tokens`. */
 const FALLBACK_MAX_TOKENS = 16_384
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
@@ -111,9 +113,11 @@ function waitFor<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   })
 }
 
-/** Advertised efforts that pi-ai understands, in pi-ai order (never invented). */
-export function supportedEfforts(model: Pick<SupportedCatalogModel, 'reasoningEfforts'>): readonly ThinkingLevel[] {
-  return THINKING_LEVELS.filter(level => model.reasoningEfforts.includes(level))
+/** Advertised efforts supported by this transport's thinking policy, in pi-ai order (never invented). */
+export function supportedEfforts(model: Pick<SupportedCatalogModel, 'id' | 'protocol' | 'reasoningEfforts'>): readonly ThinkingLevel[] {
+  const levels = model.protocol === 'anthropic-messages' && Object.hasOwn(ANTHROPIC_THINKING_POLICY, model.id)
+    ? ANTHROPIC_ADAPTIVE_EFFORTS : THINKING_LEVELS
+  return levels.filter(level => model.reasoningEfforts.includes(level))
 }
 
 function modelInfo(model: SupportedCatalogModel, vision: boolean): LlmModelInfo {
