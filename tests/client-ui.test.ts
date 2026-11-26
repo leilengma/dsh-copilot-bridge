@@ -162,6 +162,20 @@ test('model table exposes accessible eye toggles, search and real metadata witho
   assert.doesNotMatch(html, />Tools<|\$|Add models|Install model providers/)
 })
 
+test('disabled catalog models show their reason without offering a visibility toggle', () => {
+  const html = ui.renderTable({ ...props, models: [
+    props.models[0]!,
+    { id: 'unsupported', name: 'Unsupported model', disabledReason: 'unsupported-protocol' },
+    { id: 'not-offered', name: 'Unavailable model', protocol: 'openai-responses', disabledReason: 'not-offered' },
+  ] })
+  assert.match(html, /Unsupported model/)
+  assert.match(html, /Unsupported protocol/)
+  assert.match(html, /Unavailable model/)
+  assert.match(html, /Not offered for selection/)
+  assert.doesNotMatch(html, /aria-label="(?:Hide|Show) (?:Unsupported|Unavailable) model"/)
+  assert.equal((html.match(/aria-pressed=/g) ?? []).length, 1)
+})
+
 test('model table shows provider credit prices, discount and Retiring text without disabling visibility', () => {
   const html = ui.renderTable({ ...props, models: [{
     id: 'm', name: 'Model', pricing: { input: 5, output: 25, cacheRead: 0, cacheWrite: 6.25 },

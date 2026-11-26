@@ -73,13 +73,14 @@ export function ModelsTable({ status, models, busy, onSave }: {
           </tr></thead>
           <tbody>
             {shown.map(model => {
-              const visible = !hidden.includes(model.id)
+              const disabled = model.disabledReason !== undefined
+              const visible = !disabled && !hidden.includes(model.id)
               const label = text(visible ? 'hideModel' : 'showModel', { id: model.name })
-              return <tr key={model.id}>
+              return <tr key={model.id} aria-disabled={disabled || undefined}>
                 <td style={css.eyeCell}>
-                  <Button type="button" variant="ghost" style={css.eye} aria-label={label} title={label} aria-pressed={visible} disabled={busy || !status.configWritable} onClick={() => { void onSave(visible ? [...hidden, model.id] : hidden.filter(id => id !== model.id)) }}>
+                  {disabled ? null : <Button type="button" variant="ghost" style={css.eye} aria-label={label} title={label} aria-pressed={visible} disabled={busy || !status.configWritable} onClick={() => { void onSave(visible ? [...hidden, model.id] : hidden.filter(id => id !== model.id)) }}>
                     <Eye visible={visible} />
-                  </Button>
+                  </Button>}
                 </td>
                 <td style={css.cell}>
                   <div style={{ ...css.badges, alignItems: 'center' }}>
@@ -91,6 +92,7 @@ export function ModelsTable({ status, models, busy, onSave }: {
                     ].filter(Boolean).join('\n') || text('defaultPricing')} /> : null}
                   </div>
                   {model.name !== model.id ? <div style={css.modelId}>{model.id}</div> : null}
+                  {model.disabledReason ? <div style={css.modelId}>{text(model.disabledReason === 'unsupported-protocol' ? 'modelUnsupportedProtocol' : 'modelNotOffered')}</div> : null}
                 </td>
                 <td style={{ ...css.cell, ...css.numeric }}>{contextSize(model.contextWindow)}</td>
                 <td style={css.cell}>
