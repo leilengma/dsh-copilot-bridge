@@ -30,6 +30,7 @@ Restart the app to load the plugin and its client registrations.
 2. If you use GitHub Enterprise, enter your Enterprise URL (for example `https://octocorp.ghe.com/`) under **GitHub host** and click **Save**. For a personal GitHub account, leave **github.com** selected; **Use github.com** clears a saved Enterprise host. Host controls are shown only while signed out.
 3. Click **Sign in to GitHub Copilot**, open the device page (`https://<host>/login/device`) and enter the displayed code. The bridge saves its own OAuth credential and discovers the live catalog. No API key, native provider setup or preliminary chat request is needed. The **Account** tab shows usage and **Models** becomes available after sign-in.
 4. Open **GitHub Copilot → Models**. The leftmost **eye** button controls whether a supported model appears under **GitHub Copilot Bridge** in the picker: an open eye means visible; a crossed-out eye means hidden. Changes save immediately. Hidden rows stay in the management table, even when every supported model is hidden, so they can be restored.
+   Use the **pushpin immediately beside the eye** to **Pin model** (horizontal pin) or **Unpin model** (diagonal pin). Pins save immediately and move models to the top of both this table and the bridge picker, preserving catalog order within each group. Pinning never reveals a hidden model; a hidden pin can be unpinned without showing it. Disabled models have neither toggle.
 5. Click **Refresh** to discover the catalog again. Loading is shown inline. Discovery failures show an error and **Retry**; the last good rows and visibility choices are retained. The bridge has **no static catalog fallback**. A successfully discovered empty catalog is shown as empty, not as a loading or fallback list.
 6. Select a visible **GitHub Copilot Bridge** model in a new or existing session. Hiding a model removes it from the picker but does **not** prevent sessions already using it from continuing. Other providers with the same model id are unaffected.
 
@@ -39,7 +40,7 @@ Search matches model names and ids without changing the saved visibility choices
 
 Missing metadata is shown as **—**, never guessed or treated as zero. Metadata comes from the live catalog; missing prices do not block model management. There are no Add Models or Install Model Providers actions. Authentication, status, sign-out and the Enterprise host live on **Account**, not in chat commands or a separate GitHub Copilot Settings section.
 
-Signing out deletes only the bridge credential, drops its in-memory access tokens and catalog, and unsets `hiddenModels`. The bridge picker empties immediately; Enterprise host configuration is retained. The native `github-copilot` provider and other providers are unaffected. To switch GitHub hosts, sign out, save the new **GitHub host**, then sign in again.
+Signing out deletes only the bridge credential, drops its in-memory access tokens and catalog, and unsets `hiddenModels` and `pinnedModels`. The bridge picker empties immediately; Enterprise host configuration is retained. The native `github-copilot` provider and other providers are unaffected. To switch GitHub hosts, sign out, save the new **GitHub host**, then sign in again.
 
 ### Account usage
 
@@ -59,13 +60,15 @@ The authenticated `/api/copilot-bridge/usage` route reads `copilot_internal/user
     enterpriseUrl: https://octocorp.ghe.com/
     hiddenModels:
       - mai-code-2
+    pinnedModels:
+      - mai-code-2-flash
 ```
 
 You can also edit that file by hand. A blank `enterpriseUrl` or `github.com` means github.com. The host field accepts a full URL or a bare host, and only the hostname is used.
 
-`hiddenModels` applies **only to `copilot-bridge`** and matches **exact, case-sensitive model ids**, not names or patterns. Hand edits take effect live through the Loader's volatile-config notification. Unknown ids are kept while the catalog is unknown; discovery failures do not prune visibility choices. Removing the last hidden id unsets the key. Visibility controls are read-only when the settings service or profile entry is unavailable; search still works.
+`hiddenModels` applies **only to `copilot-bridge`** and matches **exact, case-sensitive model ids**, not names or patterns. Hand edits take effect live through the Loader's volatile-config notification. Unknown ids are kept while the catalog is unknown; discovery failures do not prune visibility choices. Removing the last hidden id unsets the key. `pinnedModels` uses the same exact-ID, bridge-only matching; hidden pins stay saved but are excluded from the picker until revealed. Removing the last pin unsets its key. Visibility and pin controls are read-only when the settings service or profile entry is unavailable; search still works.
 
-Every sign-out and completed sign-in **unsets `hiddenModels`**, regardless of account identity; choices are not remembered per account. A reset write failure is logged without failing authentication/sign-out. Hidden ids are plugin configuration—not filtering or bookkeeping in a native credential record. Catalog snapshots are memory-only and rediscovered after restart when signed in.
+Every sign-out, completed sign-in and configured-host change **unsets `hiddenModels` and `pinnedModels`**, regardless of account identity; choices are not remembered per account. A reset write failure is logged without failing authentication/sign-out. Hidden ids are plugin configuration—not filtering or bookkeeping in a native credential record. Catalog snapshots are memory-only and rediscovered after restart when signed in.
 
 Hiding every supported model removes the bridge group from the picker while leaving the full management table restorable. Existing sessions can still resolve supported hidden models. The bridge never wraps or filters the native provider's model listing.
 
@@ -80,7 +83,7 @@ git diff --check
 ```
 
 - `src/host/`: device flow, bridge-owned credentials, in-memory access-token lifecycle, live discovery, the dedicated LLM adapter, authenticated `/api/copilot-bridge/*` routes and config writes.
-- `src/client/`: sidebar Account/Models view and installed-plugin shortcut, localized device-code sign-in, bridge ownership/migration guidance, refresh/retry, disabled rows and immediate-save visibility controls.
+- `src/client/`: sidebar Account/Models view and installed-plugin shortcut, localized device-code sign-in, bridge ownership/migration guidance, refresh/retry, disabled rows and immediate-save visibility/pin controls.
 - `src/shared/contract.ts`: safe request/response types shared by the host and client. `GET /api/copilot-bridge/models` and `POST /api/copilot-bridge/models/refresh` return management rows, including hidden and disabled models, plus `state: loading | ready | error` and an optional last error. They never expose credential payloads or raw Copilot responses.
 - Discovery feeds the bridge picker, resolution and per-model transport selection from one snapshot. Transports use the public `@earendil-works/pi-ai` exports; the Harness-facing route remains `copilot-bridge`.
 
@@ -92,9 +95,14 @@ For deterministic installed desktop integration, build first and run:
 ELECTRON_RUN_AS_NODE=1 '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness' \
   scripts/test-installed-harness.cjs \
   '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules'
+ELECTRON_RUN_AS_NODE=1 '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness' \
+  scripts/test-installed-picker.cjs \
+  '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules'
 ```
 
 Installed checks use in-memory fixtures, not desktop credentials or profiles. Deterministic tests and installed-runtime checks do not replace browser acceptance or authorize live inference; any live smoke test requires separate approval.
+
+For an isolated rendered Models test, run `node scripts/serve-client-ui-fixture.mjs` and open its localhost URL in a scratch browser tab. It uses production components/state with fake HTTP and semantic adapters for Harness presentation primitives. With that page owned by a Tabbit task, run `tabbit-cli nodejs --task <task> < tests/client-ui.browser.js` for keyboard pin/unpin, pending, failure/retry, hidden pins, order, filter and locale assertions. This does not exercise the installed desktop shell or the physical picker transport.
 
 To test a local checkout without touching your desktop profile:
 

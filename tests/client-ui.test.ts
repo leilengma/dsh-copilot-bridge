@@ -261,6 +261,39 @@ test('manual catalog refresh posts to the authenticated route and a failed refre
   ])
 })
 
+test('pin saves post exact IDs to the authenticated route, consume confirmed status and allow retry after failure', async t => {
+  const calls: { url: string; init: RequestInit }[] = []
+  let fail = true
+  t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+    calls.push({ url, init })
+    const pinnedModels = (JSON.parse(init.body as string) as { pinnedModels: string[] }).pinnedModels
+    return Response.json(fail ? { ok: false, error: 'Could not save pins' } : { ok: true, value: { ...status, pinnedModels } }, { status: fail ? 503 : 200 })
+  })
+  await assert.rejects(ui.api.setPinnedModels(['gpt']), /Could not save pins/)
+  fail = false
+  assert.deepEqual(await ui.api.setPinnedModels(['gpt']), { ...status, pinnedModels: ['gpt'] })
+  assert.deepEqual(await ui.api.setPinnedModels([]), { ...status, pinnedModels: [] })
+  assert.deepEqual(calls.map(call => ({ url: call.url, method: call.init.method, cache: call.init.cache, headers: call.init.headers, body: call.init.body })), [
+    { url: '/api/copilot-bridge/pinned-models', method: 'POST', cache: 'no-store', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: '{"pinnedModels":["gpt"]}' },
+    { url: '/api/copilot-bridge/pinned-models', method: 'POST', cache: 'no-store', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: '{"pinnedModels":["gpt"]}' },
+    { url: '/api/copilot-bridge/pinned-models', method: 'POST', cache: 'no-store', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: '{"pinnedModels":[]}' },
+  ])
+})
+
+test('pin failures stay inline in both locales while preserving the confirmed pin and hidden states for retry', () => {
+  for (const [locale, label] of [['en', 'Unpin model GPT'], ['zh', '取消置顶模型 GPT']] as const) {
+    ui.setLocale(locale)
+    try {
+      const html = ui.renderModels({ catalog: { status: { ...status, pinnedModels: ['gpt'] }, models: props.models, state: 'ready' },
+        loading: false, busy: false, saveError: 'Could not save pins', onRefresh: () => {}, onSave: props.onSave, onSavePins: props.onSavePins })
+      assert.match(html, /role="alert"[^>]*>Could not save pins<\/p>/)
+      assert.ok(html.includes(`aria-label="${label}" title="${label}" aria-pressed="true"`))
+      assert.doesNotMatch(html, /disabled=""/)
+      assert.match(html, /aria-label="(?:Show|显示) GPT"[^>]*aria-pressed="false"/)
+    } finally { ui.setLocale('en') }
+  }
+})
+
 test('model table exposes accessible eye toggles, search and real metadata without invented costs', () => {
   const html = ui.renderTable(props)
   assert.match(html, /type="search"/)
