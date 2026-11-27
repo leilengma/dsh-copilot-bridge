@@ -1,19 +1,33 @@
 # Changelog
 
-## Unreleased
+## 1.0.2
+
+### Fixed
+
+- Bundle the three public pi-ai Copilot transports at build time instead of installing pi-ai's full runtime dependency tree. Prepared npm/tarball installs no longer pull in unused `@google/genai` / `protobufjs` build scripts; pnpm approval policy is unchanged.
+- Include generated third-party license notices, production-dependency checks and packed-runtime regression coverage for Anthropic Messages, OpenAI Responses and OpenAI Completions.
+- Synchronize package, lockfile and bundled client version metadata to `1.0.2`.
+
+## 1.0.1
 
 ### Added
 
 - Dedicated **GitHub Copilot Bridge** provider (`copilot-bridge`) with an account-specific live catalog, per-model protocol selection and bridge-owned sign-in credentials. Short-lived access tokens and catalog snapshots stay in host memory.
 - Models **Refresh** action, loading and retryable error states that retain the last good rows, and disabled rows with localized **Unsupported protocol** / **Not offered for selection** reasons instead of eye toggles. No static catalog fallback.
+- Persistent **Pin / Unpin** controls beside visibility, with pinned models ordered first within the bridge's Models page and Harness picker group. Pinning does not reveal hidden models or change the selected session model.
 
 ### Changed
 
-- Bundle the three public pi-ai Copilot transports at build time instead of installing pi-ai's full runtime dependency tree. Prepared npm/tarball installs no longer pull in unused `@google/genai` / `protobufjs` build scripts; pnpm approval policy is unchanged. Include bundled third-party license notices and packed-runtime regression coverage.
 - **Upgrade: sign in again** under **GitHub Copilot → Account** using the device flow. There is **no token import** from the native provider, environment variables or API-key/PAT fields.
 - Select models from **GitHub Copilot Bridge** (`copilot-bridge`). Existing sessions on **`github-copilot/*`** require the user's own native provider profile and credential; otherwise the picker shows **Select model**. Sessions are not migrated automatically.
 - The native **`github-copilot`** provider, profiles and credentials are **left untouched**. The bridge no longer creates native profiles, supplies native authentication, filters the native picker or attaches guidance to the native provider card.
-- Hidden-model choices apply only to `copilot-bridge`. Hidden rows stay restorable and supported hidden models continue to resolve for existing sessions. Bridge sign-out clears only its credential, in-memory tokens/catalog and hidden-model choices; Enterprise host configuration and native credentials/profiles are retained.
+- Hidden-model choices apply only to `copilot-bridge`. Hidden rows stay restorable and supported hidden models continue to resolve for existing sessions. Bridge sign-out clears only its credential, in-memory tokens/catalog and hidden/pinned-model choices; Enterprise host configuration and native credentials/profiles are retained.
+
+### Fixed
+
+- Use adaptive thinking for supported Claude models, including Opus 5.5 default requests. Validate explicit effort before HTTP while preserving legacy thinking budgets and OpenAI reasoning behavior.
+- Prevent credential-bearing provider/discovery errors from reaching clients or logs, and reject cancelled queued sign-in mutations and stale follow-ups.
+- Isolate catalog/token/metadata/stream work across account changes and disposal, and refresh cached Harness pickers after bridge catalog/settings changes.
 
 ## 1.0.0
 
