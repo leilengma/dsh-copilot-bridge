@@ -24,7 +24,7 @@ const modelsPayload = {
   })),
 }
 
-async function createHarnessFixture() {
+async function createHarnessFixture({ pluginEntry, catalog = modelsPayload, inference = new Map() } = {}) {
   const modules = process.argv[2]
   assert.ok(modules, 'pass the installed Harness node_modules directory (inside app.asar on macOS)')
   const load = name => require(path.join(modules, '@deepseek-ai', name, 'lib/index.js'))
@@ -45,9 +45,10 @@ async function createHarnessFixture() {
       'https://api.github.com/copilot_internal/v2/token',
       'https://api.individual.githubcopilot.com/models',
     ]
-    if (!allowed.includes(url)) return rejectNetwork('non-fixture fetch')
+    const fixture = inference.get(url.split('?')[0])
+    if (!allowed.includes(url) && !fixture) return rejectNetwork('non-fixture fetch')
     requests.push(url)
-    assert.equal(init?.method ?? 'GET', 'GET')
+    assert.equal(init?.method ?? 'GET', fixture ? 'POST' : 'GET')
     assert.equal(init.redirect, 'error')
     assert.equal(init.signal.aborted, false)
     const headers = new Headers(init.headers)
@@ -57,8 +58,9 @@ async function createHarnessFixture() {
       return Response.json({ token: 'fixture-copilot-access', expires_at: Date.now() / 1000 + 3600,
         refresh_in: 1800, endpoints: { api: 'https://api.individual.githubcopilot.com' } })
     }
-    assert.ok(headers.get('authorization') === 'Bearer fixture-copilot-access', 'discovery must use the exchanged fixture token')
-    return Response.json(modelsPayload)
+    assert.ok(headers.get('authorization') === 'Bearer fixture-copilot-access', 'discovery/inference must use the exchanged fixture token')
+    if (fixture) return fixture(init)
+    return Response.json(catalog)
   }
 
   let ctx
@@ -75,7 +77,7 @@ async function createHarnessFixture() {
     const { LlmRuntime } = load('dsh-llm')
     const { SessionController } = load('dsh-api-session-controller')
     const piAi = load('dsh-llm-pi-ai')
-    const bridge = require('../lib/index.js')
+    const bridge = require(pluginEntry ? path.resolve(pluginEntry) : '../lib/index.js')
     ctx = new Context()
     const loader = new Loader(ctx)
     const runtime = new LlmRuntime(ctx)
