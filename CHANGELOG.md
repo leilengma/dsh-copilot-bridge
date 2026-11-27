@@ -9,6 +9,7 @@
 
 ### Changed
 
+- Bundle the three public pi-ai Copilot transports at build time instead of installing pi-ai's full runtime dependency tree. Prepared npm/tarball installs no longer pull in unused `@google/genai` / `protobufjs` build scripts; pnpm approval policy is unchanged. Include bundled third-party license notices and packed-runtime regression coverage.
 - **Upgrade: sign in again** under **GitHub Copilot → Account** using the device flow. There is **no token import** from the native provider, environment variables or API-key/PAT fields.
 - Select models from **GitHub Copilot Bridge** (`copilot-bridge`). Existing sessions on **`github-copilot/*`** require the user's own native provider profile and credential; otherwise the picker shows **Select model**. Sessions are not migrated automatically.
 - The native **`github-copilot`** provider, profiles and credentials are **left untouched**. The bridge no longer creates native profiles, supplies native authentication, filters the native picker or attaches guidance to the native provider card.

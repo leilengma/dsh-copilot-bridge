@@ -82,6 +82,12 @@ Every sign-out, completed sign-in and configured-host change **unsets `hiddenMod
 
 Hiding every supported model removes the bridge group from the picker while leaving the full management table restorable. Existing sessions can still resolve supported hidden models. The bridge never wraps or filters the native provider's model listing.
 
+## Installation and pnpm build approvals
+
+The published package bundles the reachable Anthropic Messages, OpenAI Responses and OpenAI Completions transports. `@earendil-works/pi-ai` is a **development/build dependency**, not a production dependency: installing the prepared npm package/tarball does not install its unused Google GenAI/protobufjs dependency tree. Third-party license texts are included in `THIRD_PARTY_NOTICES.txt`.
+
+This avoids the bridge's former `@google/genai` / `protobufjs` build-approval prompt without changing pnpm policy, adding `allowBuilds`, or disabling security checks. A profile containing other plugins or earlier undecided builds can still prompt for those packages. Development checkouts intentionally install pi-ai and build tooling; those are not the published production graph. A Git-source installation can also have package-manager preparation requirements; use the prepared npm package/tarball when verifying this production-only behavior.
+
 ## Development
 
 Requires Node 24 or newer.
@@ -97,7 +103,7 @@ git diff --check
 - `src/shared/contract.ts`: safe request/response types shared by the host and client. `GET /api/copilot-bridge/models` and `POST /api/copilot-bridge/models/refresh` return management rows, including hidden and disabled models, plus `state: loading | ready | error` and an optional last error. They never expose credential payloads or raw Copilot responses.
 - Discovery feeds the bridge picker, resolution and per-model transport selection from one snapshot. Transports use the public `@earendil-works/pi-ai` exports; the Harness-facing route remains `copilot-bridge`.
 
-`lib/` is committed so that `github:` installs work without a build step. Run `npm run build` before committing.
+`lib/` and `THIRD_PARTY_NOTICES.txt` are committed release artifacts. Run `npm run build` before committing. The build traverses the host bundle's package inputs to retain license/notice texts and fails on a missing license. Public pi-ai transport imports are bundled; Harness modules and `undici` remain external. Dependency upgrades require rebuilding and reviewing the vendored transport code and notices.
 
 For deterministic installed desktop integration, build first and run:
 
@@ -111,6 +117,17 @@ ELECTRON_RUN_AS_NODE=1 '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSe
 ```
 
 Device-flow cancellation is checked inside the credential store's exclusive mutation callback and after write/readback and preference-reset awaits. A cancelled flow cannot enter a queued credential mutation or start further preference resets. The credential API has no commit-time cancellation: once the callback has admitted a write, cancellation during its disk persistence cannot revoke it. Serialized logout deletion follows that write; unload/host changes alone cannot promise rollback. Preference writes already handed to settings likewise cannot be revoked. The bridge never deletes or restores a record to compensate, which could overwrite a replacement account.
+
+To exercise all three bundled transports from an unpacked or installed candidate package (not the development checkout's dependency graph), run:
+
+```sh
+ELECTRON_RUN_AS_NODE=1 '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness' \
+  scripts/test-packed-transports.cjs \
+  '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules' \
+  '/absolute/path/to/installed/dsh-copilot-bridge/lib/index.js'
+```
+
+The packed-transport probe uses synthetic SSE replies and rejects non-fixture network access. For the install-policy check, install an `npm pack` tarball in a fresh temporary consumer with `autoInstallPeers: false` (Harness supplies peers), `strictDepBuilds: true`, and empty `allowBuilds: {}`. The production lock should contain neither pi-ai nor Google GenAI/protobufjs; no approval should be needed. Do not run this experiment against a real desktop profile.
 
 Installed checks use in-memory fixtures, not desktop credentials or profiles. Deterministic tests and installed-runtime checks do not replace browser acceptance or authorize live inference; any live smoke test requires separate approval.
 
